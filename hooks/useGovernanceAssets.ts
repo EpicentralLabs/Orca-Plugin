@@ -204,6 +204,10 @@ export default function useGovernanceAssets() {
       name: 'Switchboard',
       image: '/img/switchboard.png',
     },
+    [PackageEnum.Orca]: {
+      name: 'Orca',
+      image: '/img/Orca.png',
+    },
     [PackageEnum.VsrPlugin]: {
       name: 'Vsr Plugin',
       isVisible:
@@ -832,6 +836,64 @@ export default function useGovernanceAssets() {
       name: 'Fill vaults',
       isVisible: canUseAuthorityInstruction,
       packageId: PackageEnum.Distribution,
+    },
+
+    /*
+     ██████   ██████   ██████   ██████
+    ██    ██  ██   ██   ██      ██    ██
+    ██    ██   ██████   ██      ████████
+    ██    ██  ██  ██    ██      ██    ██
+     ██████   ██   ██   ██████   ██    ██
+    */
+
+    [Instructions.CreateOrcaPool]: {
+    name: 'Create Pool',
+    packageId: PackageEnum.Orca,
+    },
+
+    [Instructions.AddLiquidity]: {
+      name: 'Add Liquidity',
+      packageId: PackageEnum.Orca,
+    },
+
+    [Instructions.RemoveLiquidity]: {
+      name: 'Remove Liquidity',
+      packageId: PackageEnum.Orca,
+    },
+
+    [Instructions.SwapTokens]: {
+      name: 'Swap Tokens',
+      packageId: PackageEnum.Orca,
+    },
+
+    [Instructions.QueryPoolStats]: {
+      name: 'Query Pool Stats',
+      packageId: PackageEnum.Orca,
+    },
+
+    [Instructions.UpdatePoolFee]: {
+      name: 'Update Pool Fee',
+      packageId: PackageEnum.Orca,
+    },
+
+    [Instructions.CreatePosition]: {
+      name: 'Create Liquidity Position',
+      packageId: PackageEnum.Orca,
+    },
+
+    [Instructions.ClosePosition]: {
+      name: 'Close Liquidity Position',
+      packageId: PackageEnum.Orca,
+    },
+
+    [Instructions.CollectFees]: {
+      name: 'Collect Fees',
+      packageId: PackageEnum.Orca,
+    },
+
+    [Instructions.SimulateSwap]: {
+      name: 'Simulate Swap',
+      packageId: PackageEnum.Orca,
     },
   }
 

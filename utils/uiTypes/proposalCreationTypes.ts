@@ -29,6 +29,7 @@ export enum PackageEnum {
   Squads,
   Switchboard,
   VsrPlugin,
+  Orca
 }
 
 export interface UiInstruction {
@@ -410,8 +411,17 @@ export enum Instructions {
   SymmetryDeposit,
   SymmetryWithdraw,
   TokenWithdrawFees,
+  CreateOrcaPool,
+  AddLiquidity,
+  RemoveLiquidity,
+  SwapTokens,
+  QueryPoolStats,
+  UpdatePoolFee,
+  CreatePosition,
+  ClosePosition,
+  CollectFees,
+  SimulateSwap
 }
-
 export interface ComponentInstructionData {
   governedAccount?: ProgramAccount<Governance> | undefined
   getInstruction?: () => Promise<UiInstruction>
