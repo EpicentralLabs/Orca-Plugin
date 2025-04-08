@@ -66,7 +66,7 @@ export default function QueryPoolStats({
     let instructions: TransactionInstruction[] = []
 
     if (isValid && form.governedAccount?.governance?.account && wallet?.publicKey) {
-      await setWhirlpoolsConfig('solanaDevnet')
+      await setWhirlpoolsConfig('solanaMainnet')
       const mintA = new PublicKey(form.tokenAMint)
       const mintB = new PublicKey(form.tokenBMint)
 

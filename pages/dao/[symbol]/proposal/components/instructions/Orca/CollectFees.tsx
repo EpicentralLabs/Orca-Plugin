@@ -54,7 +54,7 @@ export default function CollectFees({
     let serializedInstruction = ''
 
     if (isValid && form.governedAccount?.governance?.account && wallet?.publicKey) {
-      await setWhirlpoolsConfig('solanaDevnet')
+      await setWhirlpoolsConfig('solanaMainnet')
 
       const { instructions } = await harvestPositionInstructions(
         undefined,

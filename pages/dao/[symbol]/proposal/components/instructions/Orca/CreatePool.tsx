@@ -1,39 +1,48 @@
-import { useContext, useEffect, useState } from 'react'
-import * as yup from 'yup'
-import { ProgramAccount, Governance, serializeInstructionToBase64 } from '@solana/spl-governance'
-import { validateInstruction } from '@utils/instructionTools'
-import { UiInstruction } from '@utils/uiTypes/proposalCreationTypes'
-import { PublicKey } from '@solana/web3.js'
-import { NewProposalContext } from '../../../new'
-import InstructionForm, { InstructionInput } from '../FormCreator'
-import { InstructionInputType } from '../inputInstructionType'
-import { AssetAccount } from '@utils/uiTypes/assets'
-import useWalletOnePointOh from '@hooks/useWalletOnePointOh'
-import { useRealmQuery } from '@hooks/queries/realm'
-import useGovernanceAssets from '@hooks/useGovernanceAssets'
-import { useOrcaClient } from '@hooks/useOrcaClient'
-import { Instructions } from '@utils/uiTypes/proposalCreationTypes'
+import { useContext, useEffect, useState } from 'react';
+import * as yup from 'yup';
+import {
+  ProgramAccount,
+  Governance,
+  serializeInstructionToBase64,
+} from '@solana/spl-governance';
+import { validateInstruction } from '@utils/instructionTools';
+import { UiInstruction } from '@utils/uiTypes/proposalCreationTypes';
+import { PublicKey, TransactionInstruction } from '@solana/web3.js';
+import { NewProposalContext } from '../../../new';
+import InstructionForm, { InstructionInput } from '../FormCreator';
+import { InstructionInputType } from '../inputInstructionType';
+import { AssetAccount } from '@utils/uiTypes/assets';
+import useWalletOnePointOh from '@hooks/useWalletOnePointOh';
+import { useRealmQuery } from '@hooks/queries/realm';
+import useGovernanceAssets from '@hooks/useGovernanceAssets';
+import {
+  createSplashPoolInstructions,
+  createConcentratedLiquidityPoolInstructions,
+  setWhirlpoolsConfig,
+} from '@orca-so/whirlpools';
+import { createSolanaRpc, mainnet } from '@solana/kit';
+
+// If needed, declare our Address type as string.
+type Address = string;
 
 interface CreatePoolForm {
-  governedAccount: AssetAccount | undefined
-  tokenAMint: string
-  tokenBMint: string
-  initialPrice: number
-  isConcentrated?: boolean
+  governedAccount: AssetAccount | undefined;
+  tokenAMint: string;
+  tokenBMint: string;
+  initialPrice: number;
+  isConcentrated?: boolean;
 }
 
 export default function CreatePool({
-  index,
-  governance,
-}: {
-  index: number
-  governance: ProgramAccount<Governance> | null
+                                     index,
+                                     governance,
+                                   }: {
+  index: number;
+  governance: ProgramAccount<Governance> | null;
 }) {
-  const { handleSetInstructions } = useContext(NewProposalContext)
-  const realm = useRealmQuery().data?.result
-  const { assetAccounts } = useGovernanceAssets()
-  const wallet = useWalletOnePointOh()
-  const { orcaClient } = useOrcaClient()
+  const { handleSetInstructions } = useContext(NewProposalContext);
+  const { assetAccounts } = useGovernanceAssets();
+  const wallet = useWalletOnePointOh();
 
   const [form, setForm] = useState<CreatePoolForm>({
     governedAccount: undefined,
@@ -41,42 +50,62 @@ export default function CreatePool({
     tokenBMint: '',
     initialPrice: 0.01,
     isConcentrated: false,
-  })
-  const [formErrors, setFormErrors] = useState({})
+  });
+  const [formErrors, setFormErrors] = useState({});
 
-  const shouldBeGoverned = !!(index !== 0 && governance)
+  const shouldBeGoverned = !!(index !== 0 && governance);
 
-  // YUP validation
+  // Yup validation schema.
   const schema = yup.object().shape({
     governedAccount: yup.object().nullable().required('Governance account is required'),
     tokenAMint: yup.string().required('Token A mint is required'),
     tokenBMint: yup.string().required('Token B mint is required'),
     initialPrice: yup.number().positive().required('Initial price > 0'),
     isConcentrated: yup.boolean(),
-  })
+  });
 
   async function getInstruction(): Promise<UiInstruction> {
-    const isValid = await validateInstruction({ schema, form, setFormErrors })
-    let serializedInstruction = ''
+    const isValid = await validateInstruction({ schema, form, setFormErrors });
+    let serializedInstruction = '';
 
-    if (
-      isValid &&
-      form?.governedAccount?.governance?.account &&
-      wallet?.publicKey &&
-      orcaClient
-    ) {
-      const ixs = await orcaClient.createPool({
-        tokenAMint: new PublicKey(form.tokenAMint),
-        tokenBMint: new PublicKey(form.tokenBMint),
-        initialPrice: form.initialPrice,
-        isConcentrated: form.isConcentrated,
-      })
+    if (isValid && form?.governedAccount?.governance?.account && wallet?.publicKey) {
+      // Create an RPC connection targeting mainnet.
+      const rpc = createSolanaRpc(mainnet('https://api.mainnet-beta.solana.com'));
+      // Set Whirlpools configuration to mainnet.
+      await setWhirlpoolsConfig('solanaMainnet');
 
-      // Often we only allow 1 instruction per component, but Realms supports multiple.
-      // If you have multiple ixs, you can either combine them or store them in `additionalSerializedInstructions`.
-      if (ixs.length) {
-        // Just base64-serialize the FIRST instruction, as a basic example
-        serializedInstruction = serializeInstructionToBase64(ixs[0])
+      // Suppress the error for Address conversion.
+      // @ts-ignore
+      const tokenAMintAddress: Address = new PublicKey(form.tokenAMint).toString();
+      // @ts-ignore
+      const tokenBMintAddress: Address = new PublicKey(form.tokenBMint).toString();
+
+      let instructions: TransactionInstruction[] = [];
+
+      if (!form.isConcentrated) {
+        const result = await createSplashPoolInstructions(
+          rpc,
+          tokenAMintAddress,
+          tokenBMintAddress,
+          form.initialPrice
+        );
+        // @ts-ignore
+        instructions = result.instructions.map((ix) => ix as TransactionInstruction);
+      } else {
+        const tickSpacing = 64; // Example value.
+        const result = await createConcentratedLiquidityPoolInstructions(
+          rpc,
+          tokenAMintAddress,
+          tokenBMintAddress,
+          tickSpacing,
+          form.initialPrice
+        );
+        // @ts-ignore
+        instructions = result.instructions.map((ix) => ix as TransactionInstruction);
+      }
+
+      if (instructions.length > 0) {
+        serializedInstruction = serializeInstructionToBase64(instructions[0]);
       }
     }
 
@@ -84,10 +113,9 @@ export default function CreatePool({
       serializedInstruction,
       isValid,
       governance: form?.governedAccount?.governance,
-    }
+    };
   }
 
-  // The fields to show in UI
   const inputs: InstructionInput[] = [
     {
       label: 'Governance',
@@ -123,9 +151,9 @@ export default function CreatePool({
       label: 'Concentrated Pool?',
       initialValue: false,
       name: 'isConcentrated',
-      type: InstructionInputType.SWITCH, // or check
+      type: InstructionInputType.SWITCH,
     },
-  ]
+  ];
 
   useEffect(() => {
     handleSetInstructions(
@@ -134,8 +162,8 @@ export default function CreatePool({
         getInstruction,
       },
       index
-    )
-  }, [form])
+    );
+  }, [form, handleSetInstructions, index, form?.governedAccount]);
 
   return (
     <InstructionForm
@@ -145,5 +173,5 @@ export default function CreatePool({
       setFormErrors={setFormErrors}
       formErrors={formErrors}
     />
-  )
+  );
 }
