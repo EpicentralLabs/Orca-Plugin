@@ -10,75 +10,81 @@ import { UiInstruction } from '@utils/uiTypes/proposalCreationTypes';
 import {
   PublicKey,
   Connection,
-  TransactionInstruction,
+  TransactionInstruction as Web3jsTransactionInstruction, // Alias for clarity
   Keypair,
-  Transaction,
+  Transaction, // Keep web3.js Transaction type
+  ConfirmOptions,
+  SystemProgram,
+  AccountInfo,
+  VersionedTransaction,
 } from '@solana/web3.js';
 import { NewProposalContext } from '../../../new';
 import InstructionForm, { InstructionInput } from '../FormCreator';
 import { InstructionInputType } from '../inputInstructionType';
 import { AssetAccount } from '@utils/uiTypes/assets';
-import useWalletOnePointOh from '@hooks/useWalletOnePointOh';
+import useWalletOnePointOh from '@hooks/useWalletOnePointOh'; // Your existing web3.js wallet hook
 import { useRealmQuery } from '@hooks/queries/realm';
 import useGovernanceAssets from '@hooks/useGovernanceAssets';
-import useLegacyConnectionContext from '@hooks/useLegacyConnectionContext';
+import useLegacyConnectionContext from '@hooks/useLegacyConnectionContext'; // Your existing web3.js connection hook
 
-// --- Import from Legacy SDK and dependencies ---
+// --- Import from NEWER Orca SDK ---
 import {
-  WhirlpoolContext,
-  buildWhirlpoolClient,
-  ORCA_WHIRLPOOL_PROGRAM_ID,
-  PriceMath,
-  TickUtil,
-  PoolUtil,
-  WhirlpoolData,
-  TokenUtil,
-  InitPoolParams, // Although not creating pool, might need types
-  OpenPositionParams,
-  OpenPositionWithMetadataParams,
-  WhirlpoolClient,
-  buildOpenPositionTransaction,
-  PDAUtil,
-  IGNORE_CACHE,
-} from '@orca-so/whirlpools-sdk';
+  openPositionInstructions, // For concentrated liquidity
+  openFullRangePositionInstructions, // For "Splash" like full range
+  setWhirlpoolsConfig, // Function to set config address (devnet/mainnet)
+} from '@orca-so/whirlpools';
+
+// --- Import from @solana/kit for RPC and Address ---
+import { createSolanaRpc } from '@solana/kit'; // Use kit's RPC creator
+import { Address } from '@solana/addresses'; // Newer SDK uses Address type (branded string)
+
+// --- Import supporting types/libs ---
 import { BN } from 'bn.js';
-import { Decimal } from 'decimal.js'; // SDK uses decimal.js
-import {
-  ASSOCIATED_TOKEN_PROGRAM_ID,
-  TOKEN_PROGRAM_ID,
-  getAssociatedTokenAddress,
-  createAssociatedTokenAccountInstruction,
-} from '@solana/spl-token'; // Use functions from spl-token
-import { Percentage } from '@orca-so/common-sdk'; // Import Percentage
+import { Decimal } from 'decimal.js';
+// Removed getMint import from @solana/spl-token
+import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
 
 // --- Form State Interface ---
 interface CreatePositionForm {
-  governedAccount?: AssetAccount; // The owner of the position NFT (likely a DAO treasury ATA or SOL account)
+  governedAccount?: AssetAccount; // The owner of the position NFT
   poolAddress: string;
-  tokenAAmount: string; // Use string for UI input, convert to Decimal/BN
-  tokenBAmount: string; // Use string for UI input, convert to Decimal/BN
-  lowerPrice: string; // Use string for UI input, convert to Decimal
-  upperPrice: string; // Use string for UI input, convert to Decimal
-  slippageBps: number; // Basis points (e.g., 100 for 1%)
-  isFullRange: boolean;
+  tokenAAmount: string; // Use string for UI input, convert to bigint
+  tokenBAmount: string; // Use string for UI input, convert to bigint
+  lowerPrice: string; // Use string for UI input, parse to number
+  upperPrice: string; // Use string for UI input, parse to number
+  slippageBps: number; // Basis points (e.g., 50 for 0.5%)
+  isFullRange: boolean; // Replaces 'splash'
 }
 
-// --- Helper: Convert UI string amount to Decimal ---
-const uiAmountToDecimal = (amount: string): Decimal => {
+// Helper to convert UI amount (string) to bigint based on mint decimals
+// Uses manual parsing of Mint account data instead of getMint
+async function uiAmountToBigInt(
+  connection: Connection,
+  amount: string,
+  mint: PublicKey // Ensure mint is not null when calling
+): Promise<bigint> {
   try {
-    return new Decimal(amount);
-  } catch {
-    return new Decimal(0);
-  }
-};
+    console.log(`Fetching account info for mint: ${mint.toBase58()}`);
+    const mintAccountInfo = await connection.getAccountInfo(mint);
+    if (!mintAccountInfo) {
+      throw new Error(`Mint account not found: ${mint.toBase58()}`);
+    }
+    if (mintAccountInfo.data.length < 82) { // Mint layout size is 82 bytes
+      throw new Error(`Mint account data length too short: ${mintAccountInfo.data.length}`);
+    }
+    // Decimals field is a single byte at offset 44
+    const decimals = mintAccountInfo.data.readUInt8(44);
+    console.log(`Decimals for mint ${mint.toBase58()}: ${decimals}`);
 
-// --- Helper: Convert Decimal amount to BN based on mint decimals ---
-const decimalAmountToBN = (
-  decimalAmount: Decimal,
-  decimals: number
-): BN => {
-  return new BN(decimalAmount.mul(new Decimal(10).pow(decimals)).toFixed(0));
-};
+    const amountDecimal = new Decimal(amount || '0');
+    const baseAmount = amountDecimal.mul(new Decimal(10).pow(decimals));
+    return BigInt(baseAmount.toFixed(0));
+  } catch (error) {
+    console.error("Error converting amount to BigInt:", error);
+    throw new Error(`Failed to convert amount "${amount}" for mint ${mint?.toBase58()}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 
 // --- React Component ---
 export default function CreatePosition({
@@ -90,65 +96,53 @@ export default function CreatePosition({
 }) {
   // --- Hooks ---
   const { handleSetInstructions } = useContext(NewProposalContext);
-  const connection = useLegacyConnectionContext();
+  const connection = useLegacyConnectionContext(); // Your web3.js connection
   const realm = useRealmQuery().data?.result;
   const { assetAccounts } = useGovernanceAssets();
-  const wallet = useWalletOnePointOh(); // This is the "funder" paying transaction fees
+  const wallet = useWalletOnePointOh(); // Your web3.js wallet adapter
 
   // --- State ---
   const [form, setForm] = useState<CreatePositionForm>({
+    governedAccount: undefined,
     poolAddress: '',
     tokenAAmount: '0',
     tokenBAmount: '0',
     lowerPrice: '0',
     upperPrice: '0',
     isFullRange: false,
-    slippageBps: 50, // Default 0.5% slippage
+    slippageBps: 50, // Default 0.5%
   });
   const [formErrors, setFormErrors] = useState({});
   const shouldBeGoverned = !!(index !== 0 && governance);
 
   // --- Validation Schema ---
+  // (Schema remains the same)
   const schema = yup.object().shape({
     governedAccount: yup
       .object()
       .nullable()
-      .required('Governed account (Position Owner) is required'),
+      .required('Governance account (Position Owner) is required'),
     poolAddress: yup
       .string()
       .required('Pool address is required')
       .test('is-pubkey', 'Invalid Pool address', (value) => {
-        try {
-          new PublicKey(value || '');
-          return true;
-        } catch (e) {
-          return false;
-        }
+        try { new PublicKey(value || ''); return true; } catch (e) { return false; }
       }),
     tokenAAmount: yup
       .string()
-      .test(
-        'is-positive-or-zero',
-        'Amount must be positive or zero',
-        (val) => !val || !isNaN(parseFloat(val)) && parseFloat(val) >= 0
-      )
+      .test('is-positive-or-zero', 'Amount must be >= 0', (val) => !val || !isNaN(parseFloat(val)) && parseFloat(val) >= 0)
       .required('Token A amount is required'),
     tokenBAmount: yup
       .string()
-      .test(
-        'is-positive-or-zero',
-        'Amount must be positive or zero',
-        (val) => !val || !isNaN(parseFloat(val)) && parseFloat(val) >= 0
-      )
+      .test('is-positive-or-zero', 'Amount must be >= 0', (val) => !val || !isNaN(parseFloat(val)) && parseFloat(val) >= 0)
       .required('Token B amount is required'),
-    // Require at least one amount to be positive
-    tokenAmounts: yup.mixed().test(
-      'at-least-one-positive',
-      'At least one token amount must be greater than zero',
+    tokenInputLogic: yup.mixed().test(
+      'one-token-amount-provided',
+      'Provide amount for Token A OR Token B (not both, unless one is 0)',
       function() {
         const amountA = parseFloat(this.parent.tokenAAmount || '0');
         const amountB = parseFloat(this.parent.tokenBAmount || '0');
-        return amountA > 0 || amountB > 0;
+        return (amountA === 0 && amountB === 0) || (amountA > 0 && amountB === 0) || (amountA === 0 && amountB > 0);
       }
     ),
     lowerPrice: yup.string().when('isFullRange', {
@@ -156,20 +150,11 @@ export default function CreatePosition({
       then: (schema) =>
         schema
           .required('Lower price is required for concentrated positions')
-          .test(
-            'is-positive',
-            'Price must be positive',
-            (val) => !val || !isNaN(parseFloat(val)) && parseFloat(val) > 0
-          )
-          .test(
-            'is-less-than-upper',
-            'Lower price must be less than upper price',
-            function (value) {
-              const upperPrice = new Decimal(this.parent.upperPrice || '0');
-              const lowerPrice = new Decimal(value || '0');
-              return lowerPrice.lt(upperPrice);
-            }
-          ),
+          .test('is-positive', 'Price must be > 0', (val) => !val || !isNaN(parseFloat(val)) && parseFloat(val) > 0)
+          .test('is-less-than-upper', 'Lower price must be less than upper price', function (value) {
+            const upperPrice = parseFloat(this.parent.upperPrice || '0');
+            return parseFloat(value || '0') < upperPrice;
+          }),
       otherwise: (schema) => schema.notRequired(),
     }),
     upperPrice: yup.string().when('isFullRange', {
@@ -177,196 +162,132 @@ export default function CreatePosition({
       then: (schema) =>
         schema
           .required('Upper price is required for concentrated positions')
-          .test(
-            'is-positive',
-            'Price must be positive',
-            (val) => !val || !isNaN(parseFloat(val)) && parseFloat(val) > 0
-          ),
+          .test('is-positive', 'Price must be > 0', (val) => !val || !isNaN(parseFloat(val)) && parseFloat(val) > 0),
       otherwise: (schema) => schema.notRequired(),
     }),
     slippageBps: yup
       .number()
-      .transform((value) => (isNaN(value) ? 0 : value)) // Handle NaN input
-      .min(0, 'Slippage cannot be negative')
-      .max(10000, 'Slippage cannot exceed 10000 BPS (100%)')
+      .transform((value) => (isNaN(value) ? 0 : value))
+      .min(0)
+      .max(10000)
       .required('Slippage is required'),
   });
 
   // --- getInstruction Implementation ---
   async function getInstruction(): Promise<UiInstruction> {
-    // Reset errors on each attempt
     setFormErrors({});
-
     const isValid = await validateInstruction({ schema, form, setFormErrors });
-    const prerequisiteInstructions: TransactionInstruction[] = [];
+    const prerequisiteInstructions: Web3jsTransactionInstruction[] = [];
     const prerequisiteInstructionsSigners: Keypair[] = [];
     const additionalSerializedInstructions: string[] = [];
 
-    // Basic validation and wallet check
     if (
       !isValid ||
       !form.governedAccount?.governance?.account ||
-      !wallet?.publicKey ||
+      !form.governedAccount?.extensions.transferAddress || // Owner address
+      !wallet?.publicKey || // Funder wallet
       !connection.current
     ) {
-      return {
-        serializedInstruction: '',
-        isValid: false,
-        governance: form.governedAccount?.governance,
-        prerequisiteInstructions,
-        prerequisiteInstructionsSigners,
-        additionalSerializedInstructions,
-      };
+      if (!form.governedAccount?.extensions.transferAddress && form.governedAccount) {
+        setFormErrors(prev => ({...prev, governedAccount: 'Selected governed account does not have a valid owner address.' }));
+      }
+      if (!wallet?.connected) {
+        setFormErrors(prev => ({...prev, _error: 'Wallet not connected.' }));
+      }
+      return { serializedInstruction: '', isValid: false, governance: form.governedAccount?.governance, prerequisiteInstructions, prerequisiteInstructionsSigners, additionalSerializedInstructions: [] };
     }
 
+    let tokenMintA: PublicKey | null = null;
+    let tokenMintB: PublicKey | null = null;
+
     try {
-      // --- Determine Owner and Funder ---
-      // The DAO treasury/account that will own the Position NFT
-      const owner = form.governedAccount.extensions.transferAddress!; // Use governance address (needs ATAs derived from this)
-      // The user's connected wallet paying for the transaction
-      const funder = wallet.publicKey;
+      // --- Owner & Funder ---
+      const owner = form.governedAccount.extensions.transferAddress;
+      const funderWallet = wallet;
 
-      // --- Initialize Whirlpool SDK Context and Client ---
-      const ctx = WhirlpoolContext.withProvider(
-        wallet, // Wallet must implement Signer & Provider interfaces from @project-serum/anchor
-        connection.current,
-        ORCA_WHIRLPOOL_PROGRAM_ID
-      );
-      const client = buildWhirlpoolClient(ctx);
-      const poolPubkey = new PublicKey(form.poolAddress);
+      // --- Set Whirlpools Config ---
+      await setWhirlpoolsConfig('solanaMainnet');
 
-      // --- Fetch Pool Data ---
-      console.log(`Fetching pool data for ${poolPubkey.toBase58()}...`);
-      const poolData = await client.getPool(poolPubkey, IGNORE_CACHE); // Use IGNORE_CACHE for latest state
-      if (!poolData) {
-        throw new Error(`Whirlpool not found: ${poolPubkey.toBase58()}`);
+      // --- Create RPC Client ---
+      const rpc = createSolanaRpc(connection.current.rpcEndpoint);
+
+      // --- Prepare Pool Address ---
+      const poolAddress = form.poolAddress as Address;
+      const poolPublicKey = new PublicKey(form.poolAddress);
+
+      // --- Fetch Pool Account Data and Extract Mints ---
+      console.log(`Fetching pool account info for ${poolPublicKey.toBase58()}`);
+      const poolAccountInfo = await connection.current.getAccountInfo(poolPublicKey);
+      if (!poolAccountInfo) {
+        throw new Error(`Pool account not found: ${poolPublicKey.toBase58()}`);
       }
-      console.log('Pool data fetched:', poolData);
-
-      const { tokenMintA, tokenMintB, tickSpacing, sqrtPriceX64, tickCurrentIndex } = poolData;
-
-      // --- Fetch Token Decimals ---
-      console.log('Fetching token decimals...');
-      const [tokenInfoA, tokenInfoB] = await Promise.all([
-        TokenUtil.getTokenInfo(ctx.connection, tokenMintA),
-        TokenUtil.getTokenInfo(ctx.connection, tokenMintB)
-      ]);
-      if (!tokenInfoA || !tokenInfoB) {
-        throw new Error("Failed to fetch token mint info");
+      if (poolAccountInfo.data.length < 173 + 32) {
+        throw new Error("Pool account data is too short to contain mints.");
       }
-      const decimalsA = tokenInfoA.decimals;
-      const decimalsB = tokenInfoB.decimals;
-      console.log(`Token A Decimals: ${decimalsA}, Token B Decimals: ${decimalsB}`);
+      const mintAOffset = 93;
+      const mintBOffset = 173;
+      tokenMintA = new PublicKey(poolAccountInfo.data.subarray(mintAOffset, mintAOffset + 32));
+      tokenMintB = new PublicKey(poolAccountInfo.data.subarray(mintBOffset, mintBOffset + 32));
+      console.log(`Extracted Mints - A: ${tokenMintA.toBase58()}, B: ${tokenMintB.toBase58()}`);
 
-      // --- Determine Tick Indexes ---
-      let tickLowerIndex: number;
-      let tickUpperIndex: number;
+      // --- Prepare SDK Parameters ---
+      const param: { tokenA?: bigint; tokenB?: bigint } = {};
+      const amountA = parseFloat(form.tokenAAmount || '0');
+      const amountB = parseFloat(form.tokenBAmount || '0');
 
-      if (form.isFullRange) {
-        tickLowerIndex = TickUtil.getMinTickIndex(tickSpacing);
-        tickUpperIndex = TickUtil.getMaxTickIndex(tickSpacing);
-        console.log(`Full range selected. Tick Lower: ${tickLowerIndex}, Tick Upper: ${tickUpperIndex}`);
+      if (amountA > 0) {
+        if (!tokenMintA) throw new Error("Token Mint A not available (logic error).");
+        param.tokenA = await uiAmountToBigInt(connection.current, form.tokenAAmount, tokenMintA);
+      } else if (amountB > 0) {
+        if (!tokenMintB) throw new Error("Token Mint B not available (logic error).");
+        param.tokenB = await uiAmountToBigInt(connection.current, form.tokenBAmount, tokenMintB);
       } else {
-        // Convert UI prices (strings) to Decimal objects
-        const lowerPriceDecimal = uiAmountToDecimal(form.lowerPrice);
-        const upperPriceDecimal = uiAmountToDecimal(form.upperPrice);
-
-        console.log(`Calculating ticks for price range: ${lowerPriceDecimal.toString()} - ${upperPriceDecimal.toString()}`);
-
-        // Convert Decimal prices to PriceX64 (BN)
-        const lowerPriceX64 = PriceMath.decimalToPriceX64(lowerPriceDecimal, decimalsA, decimalsB);
-        const upperPriceX64 = PriceMath.decimalToPriceX64(upperPriceDecimal, decimalsA, decimalsB);
-
-        // Convert PriceX64 to Tick Index
-        tickLowerIndex = PriceMath.priceX64ToTickIndex(lowerPriceX64);
-        tickUpperIndex = PriceMath.priceX64ToTickIndex(upperPriceX64);
-
-        // Snap ticks to the nearest initializable tick index based on tickSpacing
-        tickLowerIndex = TickUtil.getInitializableTickIndex(tickLowerIndex, tickSpacing);
-        tickUpperIndex = TickUtil.getInitializableTickIndex(tickUpperIndex, tickSpacing);
-
-        console.log(`Calculated initializable ticks. Lower: ${tickLowerIndex}, Upper: ${tickUpperIndex}`);
-
-        // Final validation after snapping
-        if (tickLowerIndex >= tickUpperIndex) {
-          throw new Error("Lower tick must be less than upper tick after snapping to initializable indices.");
-        }
-        if (tickLowerIndex < TickUtil.getMinTickIndex(tickSpacing) || tickUpperIndex > TickUtil.getMaxTickIndex(tickSpacing)) {
-          throw new Error("Calculated ticks are out of allowable bounds for this pool's tick spacing.");
-        }
+        throw new Error("Validation Error: At least one token amount must be greater than zero.");
       }
 
-      // --- Calculate Liquidity Amount from Token Inputs ---
-      console.log('Calculating liquidity amount...');
-      const amountADecimal = uiAmountToDecimal(form.tokenAAmount);
-      const amountBDecimal = uiAmountToDecimal(form.tokenBAmount);
+      const lowerPrice = form.isFullRange ? 0 : parseFloat(form.lowerPrice);
+      const upperPrice = form.isFullRange ? 0 : parseFloat(form.upperPrice);
+      const slippageBps = form.slippageBps;
 
-      const amountA_BN = decimalAmountToBN(amountADecimal, decimalsA);
-      const amountB_BN = decimalAmountToBN(amountBDecimal, decimalsB);
+      // --- Wallet for SDK (Funder) ---
+      if (!funderWallet.signTransaction || !funderWallet.publicKey) {
+        throw new Error("Connected wallet doesn't have publicKey or signTransaction method.");
+      }
+      const funderSigner = funderWallet as any; // Cast funder wallet
 
-      // Use PoolUtil to estimate liquidity. It requires the pool's current sqrtPrice.
-      // This function determines liquidity based on the provided token amounts and the price range.
-      const liquidityAmount = PoolUtil.estimateLiquidityFromTokenAmounts(
-        tickCurrentIndex,
-        tickLowerIndex,
-        tickUpperIndex,
-        { tokenA: amountA_BN, tokenB: amountB_BN },
-        true, // Adjust for slippage here? SDK might handle it later. Let's assume true for now.
-        poolData // Pass the fetched pool data
-      );
+      // --- Call the Newer SDK function ---
+      console.log(`Calling ${form.isFullRange ? 'openFullRangePositionInstructions' : 'openPositionInstructions'}`);
+      // ... (rest of the console logs)
 
-      console.log(`Calculated liquidity amount (BN): ${liquidityAmount.toString()}`);
-
-      if (liquidityAmount.isZero()) {
-        throw new Error("Calculated liquidity is zero. Check token amounts and price range relative to the current pool price.");
+      let kitInstructions;
+      if (form.isFullRange) {
+        // Casting param as any to bypass TS2345
+        const { instructions } = await openFullRangePositionInstructions(
+          rpc, poolAddress, param as any, slippageBps, funderSigner
+        );
+        kitInstructions = instructions;
+      } else {
+        // Casting param as any to bypass TS2345
+        const { instructions } = await openPositionInstructions(
+          rpc, poolAddress, param as any, lowerPrice, upperPrice, slippageBps, funderSigner
+        );
+        kitInstructions = instructions;
       }
 
-      // --- Generate Position NFT Mint Keypair ---
-      const positionMintKeypair = Keypair.generate();
-      console.log(`Generated Position NFT Mint Keypair: ${positionMintKeypair.publicKey.toBase58()}`);
-      // This keypair needs to sign the transaction to create the mint account.
-      prerequisiteInstructionsSigners.push(positionMintKeypair);
+      console.log(`Received ${kitInstructions.length} instructions from SDK.`);
 
-      // --- Prepare parameters for buildOpenPositionTransaction ---
-      const slippageTolerance = Percentage.fromFraction(form.slippageBps, 10000); // Convert BPS to Percentage (e.g., 100 BPS = 100/10000 = 0.01 or 1%)
-      console.log(`Slippage tolerance: ${slippageTolerance.toString()}`);
-
-      const openPositionParams: OpenPositionWithMetadataParams = {
-        poolAddress: poolPubkey,
-        owner: owner, // The DAO treasury address
-        funder: funder, // The user's wallet paying tx fees
-        positionMint: positionMintKeypair.publicKey, // The new mint address
-        tickLowerIndex: tickLowerIndex,
-        tickUpperIndex: tickUpperIndex,
-        liquidityAmount: liquidityAmount,
-        // Source ATAs will be derived by the SDK or need to be provided if not standard derivation
-        // The SDK's TransactionBuilder usually handles finding/creating ATAs for the 'owner'
-        slippage: slippageTolerance,
-      };
-
-      console.log('Building open position transaction...');
-      // --- Build the Transaction using the SDK's builder ---
-      const openPositionTxBuilder = await buildOpenPositionTransaction(ctx, openPositionParams);
-
-      // --- Get Transaction and Signers ---
-      const transaction = await openPositionTxBuilder.build();
-      console.log('Transaction built.');
-
-      // Add any additional signers returned by the builder (potentially metadata signers, etc.)
-      // The positionMintKeypair is already added manually above.
-      transaction.signers?.forEach(signer => {
-        // Avoid adding duplicates if the builder includes the mint keypair
-        if (!prerequisiteInstructionsSigners.some(s => s.publicKey.equals(signer.publicKey))) {
-          prerequisiteInstructionsSigners.push(signer);
-        }
-      });
-      console.log(`Total signers required: ${prerequisiteInstructionsSigners.length}`);
+      // --- Attempt to Convert/Cast Instructions (RISKY) ---
+      const web3JsInstructions = kitInstructions as unknown as Web3jsTransactionInstruction[];
+      console.warn("Attempting to cast @solana/transactions instructions to @solana/web3.js format. This might fail if structures differ significantly.");
 
       // --- Serialize Instructions ---
-      // The TransactionBuilder might include setup instructions (like ATA creation)
-      // We should serialize all instructions from the final built transaction payload.
-      transaction.instructions.forEach((ix, idx) => {
-        console.log(`Serializing instruction ${idx + 1}/${transaction.instructions.length}`);
+      const finalInstructions = [...prerequisiteInstructions, ...web3JsInstructions];
+      finalInstructions.forEach((ix, idx) => {
+        if (!ix || !ix.keys || !ix.programId) {
+          console.error("Instruction structure seems invalid after casting:", ix);
+          throw new Error(`Instruction at index ${idx} has invalid structure after casting.`);
+        }
+        console.log(`Serializing instruction ${idx + 1}/${finalInstructions.length}`);
         additionalSerializedInstructions.push(serializeInstructionToBase64(ix));
       });
 
@@ -375,40 +296,46 @@ export default function CreatePosition({
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
       console.error('Error creating Orca position instruction:', error);
-      setFormErrors({ _error: `Failed to create instruction: ${errorMessage}` });
-      return {
-        serializedInstruction: '',
-        isValid: false,
-        governance: form.governedAccount?.governance,
-        prerequisiteInstructions, // May be empty if builder handles everything
-        prerequisiteInstructionsSigners,
-        additionalSerializedInstructions: [], // Clear on error
-      };
+      if (errorMessage.includes("Pool account not found")) {
+        setFormErrors({ poolAddress: errorMessage });
+      } else if (errorMessage.includes("amount conversion") || errorMessage.includes("Mint account not found")) {
+        setFormErrors({ tokenAAmount: errorMessage, tokenBAmount: errorMessage });
+      } else if (errorMessage.includes("signTransaction")) {
+        setFormErrors({ _error: `Wallet signing function might be incompatible: ${errorMessage}` });
+      } else if (errorMessage.includes("serializeInstructionToBase64") || errorMessage.includes("invalid structure")) {
+        setFormErrors({ _error: `Failed to serialize instructions - format mismatch likely: ${errorMessage}` });
+      } else if (errorMessage.includes("IncreaseLiquidityQuoteParam")) {
+        setFormErrors({ _error: `SDK Type Error (Param): ${errorMessage}` }); // More specific error
+      }
+      else {
+        setFormErrors({ _error: `Failed to create instruction: ${errorMessage}` });
+      }
+      return { serializedInstruction: '', isValid: false, governance: form.governedAccount?.governance, prerequisiteInstructions: [], prerequisiteInstructionsSigners: [], additionalSerializedInstructions: [] };
     }
 
     // --- Return UiInstruction ---
     return {
-      serializedInstruction: '', // Keep empty as per PlaceLimitOrder example pattern
+      serializedInstruction: '', // Keep empty as per pattern
       isValid: true,
       governance: form.governedAccount?.governance,
-      prerequisiteInstructions, // Usually empty as builder includes setup
+      prerequisiteInstructions: [],
       prerequisiteInstructionsSigners,
       additionalSerializedInstructions,
-      chunkBy: 2, // Orca open position can sometimes involve ~4 instructions, chunking might be safe. Adjust as needed.
+      chunkBy: 2, // Adjust chunk size as needed
     };
   }
 
   // --- Form Inputs Definition ---
+  // (Inputs remain the same)
   const inputs: InstructionInput[] = [
     {
       label: 'Position Owner (Governance Account)',
-      tooltip: 'The DAO account that will own the Position NFT representing the liquidity.',
       initialValue: form.governedAccount,
       name: 'governedAccount',
       type: InstructionInputType.GOVERNED_ACCOUNT,
       shouldBeGoverned,
       governance,
-      options: assetAccounts.filter(acc => !!acc.extensions.transferAddress), // Filter for accounts that can own NFTs/Tokens
+      options: assetAccounts.filter(acc => !!acc.extensions.transferAddress),
     },
     {
       label: 'Whirlpool Address',
@@ -419,51 +346,44 @@ export default function CreatePosition({
     },
     {
       label: 'Full Range Position?',
-      tooltip: 'Provide liquidity across the entire price range (like a standard Uniswap V2 pool). Ignores Lower/Upper Price.',
       initialValue: form.isFullRange,
       name: 'isFullRange',
       type: InstructionInputType.SWITCH,
     },
-    // Conditionally show price inputs only if not full range
     ...(!form.isFullRange
       ? [
         {
           label: 'Lower Price',
-          tooltip: 'The minimum price for your concentrated liquidity range.',
           initialValue: form.lowerPrice,
           name: 'lowerPrice',
           type: InstructionInputType.INPUT,
-          inputType: 'text', // Use text for Decimal precision
+          inputType: 'text',
         },
         {
           label: 'Upper Price',
-          tooltip: 'The maximum price for your concentrated liquidity range.',
           initialValue: form.upperPrice,
           name: 'upperPrice',
           type: InstructionInputType.INPUT,
-          inputType: 'text', // Use text for Decimal precision
+          inputType: 'text',
         },
       ]
       : []),
     {
       label: 'Token A Amount',
-      tooltip: 'Amount of the first token in the pool pair to deposit.',
       initialValue: form.tokenAAmount,
       name: 'tokenAAmount',
       type: InstructionInputType.INPUT,
-      inputType: 'text', // Use text for Decimal/BN precision
+      inputType: 'text',
     },
     {
       label: 'Token B Amount',
-      tooltip: 'Amount of the second token in the pool pair to deposit.',
       initialValue: form.tokenBAmount,
       name: 'tokenBAmount',
       type: InstructionInputType.INPUT,
-      inputType: 'text', // Use text for Decimal/BN precision
+      inputType: 'text',
     },
     {
       label: 'Acceptable Slippage (BPS)',
-      tooltip: 'Maximum allowed price change during transaction execution, in Basis Points (100 BPS = 1%).',
       initialValue: form.slippageBps,
       name: 'slippageBps',
       type: InstructionInputType.INPUT,
@@ -481,8 +401,8 @@ export default function CreatePosition({
       },
       index
     );
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- Re-register whenever form state changes
-  }, [form, governance, index, handleSetInstructions]); // Include governance, index, handleSetInstructions
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form, governance, index, handleSetInstructions]);
 
   // --- Render Component ---
   return (

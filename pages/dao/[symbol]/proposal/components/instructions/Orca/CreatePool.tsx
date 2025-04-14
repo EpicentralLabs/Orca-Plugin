@@ -10,70 +10,59 @@ import { UiInstruction } from '@utils/uiTypes/proposalCreationTypes';
 import {
   PublicKey,
   Connection,
-  TransactionInstruction,
+  TransactionInstruction as Web3jsTransactionInstruction, // Alias for clarity
   Keypair,
   Transaction,
+  ConfirmOptions,
+  SystemProgram,
+  AccountInfo,
 } from '@solana/web3.js';
 import { NewProposalContext } from '../../../new';
 import InstructionForm, { InstructionInput } from '../FormCreator';
 import { InstructionInputType } from '../inputInstructionType';
 import { AssetAccount } from '@utils/uiTypes/assets';
-import useWalletOnePointOh from '@hooks/useWalletOnePointOh';
+import useWalletOnePointOh from '@hooks/useWalletOnePointOh'; // Your existing web3.js wallet hook
 import { useRealmQuery } from '@hooks/queries/realm';
 import useGovernanceAssets from '@hooks/useGovernanceAssets';
-import useLegacyConnectionContext from '@hooks/useLegacyConnectionContext';
+import useLegacyConnectionContext from '@hooks/useLegacyConnectionContext'; // Your existing web3.js connection hook
 
-// --- Import from Legacy SDK and dependencies ---
+// --- Import from NEWER Orca SDK ---
 import {
-  WhirlpoolContext,
-  buildWhirlpoolClient,
-  ORCA_WHIRLPOOL_PROGRAM_ID,
-  PriceMath,
-  TickUtil,
-  TokenUtil,
-  InitPoolParams,
-  WhirlpoolClient,
-  buildCreatePoolTransaction, // Use the correct builder
-  PDAUtil,
-  IGNORE_CACHE,
-  TICK_SPACING, // Import predefined tick spacings if needed
-} from '@orca-so/whirlpools-sdk';
-import { BN } from 'bn.js';
-import { Decimal } from 'decimal.js'; // SDK uses decimal.js
-import { Percentage } from '@orca-so/common-sdk'; // Although not used directly for pool creation, good to have consistent imports
+  createSplashPoolInstructions,
+  createConcentratedLiquidityPoolInstructions,
+  setWhirlpoolsConfig,
+  // Define tick spacing constants if not importing directly
+  // TICK_SPACING, // Might not be exported directly
+} from '@orca-so/whirlpools';
 
-// --- Define valid Orca Tick Spacings ---
+// --- Import from @solana/kit for RPC and Address ---
+import { createSolanaRpc } from '@solana/kit'; // Use kit's RPC creator
+import { Address } from '@solana/addresses'; // Newer SDK uses Address type (branded string)
+
+// --- Import supporting types/libs ---
+import { BN } from 'bn.js';
+import { Decimal } from 'decimal.js';
+
+// --- Define valid Orca Tick Spacings (based on legacy constants/docs) ---
 // Reference: https://dev.orca.so/legacy-whirlpools/overview/tick-spacing-and-fees
 const VALID_TICK_SPACINGS = [
-  TICK_SPACING.STANDARD, // 64 (0.3%)
-  TICK_SPACING.STABLE,   // 8 (0.05%) - Might need adjustment based on exact Orca values
-  1,  // 1 (0.01%)
-  128, // 128 (1.0%)
-  // Add others if Orca supports more, check their constants/docs
+  1,   // 0.01%
+  8,   // 0.05%
+  64,  // 0.30% (Standard)
+  128, // 1.00%
 ];
-
-const DEFAULT_TICK_SPACING = TICK_SPACING.STANDARD; // 64
+const DEFAULT_TICK_SPACING = 64; // Standard
 
 // --- Form State Interface ---
 interface CreatePoolForm {
-  // governedAccount is not directly used in pool creation IX, funder pays.
-  // Keep it for consistency with proposal UI if needed, but it won't be the 'funder' param.
+  // governedAccount is for proposal context, not the funder IX param
   governedAccount?: AssetAccount;
   tokenAMint: string;
   tokenBMint: string;
-  initialPrice: string; // Use string for Decimal precision
-  tickSpacing: number; // Required for Whirlpool creation
+  initialPrice: string; // Use string for Decimal precision in UI
+  tickSpacing: number; // Only used if useConcentratedPool is true
+  useConcentratedPool: boolean; // Selector between Splash/Concentrated
 }
-
-// --- Helper: Convert UI string amount to Decimal ---
-const uiAmountToDecimal = (amount: string): Decimal => {
-  try {
-    // Ensure non-empty string before creating Decimal
-    return new Decimal(amount || '0');
-  } catch {
-    return new Decimal(0);
-  }
-};
 
 // --- React Component ---
 export default function CreatePool({
@@ -85,25 +74,25 @@ export default function CreatePool({
 }) {
   // --- Hooks ---
   const { handleSetInstructions } = useContext(NewProposalContext);
-  const connection = useLegacyConnectionContext();
+  const connection = useLegacyConnectionContext(); // Your web3.js connection
   const realm = useRealmQuery().data?.result;
-  const { assetAccounts } = useGovernanceAssets(); // Needed for governedAccount selector
-  const wallet = useWalletOnePointOh(); // This is the "funder" paying transaction fees
+  const { assetAccounts } = useGovernanceAssets();
+  const wallet = useWalletOnePointOh(); // Your web3.js wallet adapter
 
   // --- State ---
   const [form, setForm] = useState<CreatePoolForm>({
-    governedAccount: undefined, // Not directly used by IX but needed for UI pattern
+    governedAccount: undefined,
     tokenAMint: '',
     tokenBMint: '',
-    initialPrice: '0.01', // Default initial price as string
-    tickSpacing: DEFAULT_TICK_SPACING, // Default tick spacing
+    initialPrice: '0.01', // Default initial price
+    tickSpacing: DEFAULT_TICK_SPACING,
+    useConcentratedPool: false, // Default to Splash Pool
   });
   const [formErrors, setFormErrors] = useState({});
-  const shouldBeGoverned = !!(index !== 0 && governance); // Still relevant for proposal context
+  const shouldBeGoverned = !!(index !== 0 && governance);
 
   // --- Validation Schema ---
   const schema = yup.object().shape({
-    // Keep governedAccount validation if required by the UI pattern
     governedAccount: yup
       .object()
       .nullable()
@@ -126,107 +115,113 @@ export default function CreatePool({
     initialPrice: yup
       .string()
       .required('Initial price is required')
-      .test(
-        'is-positive',
-        'Initial price must be positive',
-        (val) => {
-          try { return new Decimal(val || '0').isPositive(); } catch { return false; }
-        }
-      ),
-    tickSpacing: yup
-      .number()
-      .required('Tick Spacing is required')
-      .oneOf(VALID_TICK_SPACINGS, `Tick spacing must be one of: ${VALID_TICK_SPACINGS.join(', ')}`),
+      .test('is-positive', 'Initial price must be positive', (val) => {
+        try { return new Decimal(val || '0').isPositive(); } catch { return false; }
+      }),
+    useConcentratedPool: yup.boolean(),
+    tickSpacing: yup.number().when('useConcentratedPool', {
+      is: true,
+      then: schema => schema
+        .required('Tick Spacing is required for Concentrated pools')
+        .oneOf(VALID_TICK_SPACINGS, `Tick spacing must be one of: ${VALID_TICK_SPACINGS.join(', ')}`),
+      otherwise: schema => schema.notRequired(),
+    }),
   });
 
   // --- getInstruction Implementation ---
   async function getInstruction(): Promise<UiInstruction> {
-    // Reset errors
     setFormErrors({});
-
     const isValid = await validateInstruction({ schema, form, setFormErrors });
-    const prerequisiteInstructions: TransactionInstruction[] = [];
+    const prerequisiteInstructions: Web3jsTransactionInstruction[] = [];
     const prerequisiteInstructionsSigners: Keypair[] = [];
     const additionalSerializedInstructions: string[] = [];
 
-    // Basic validation and wallet check
     if (
       !isValid ||
       !form.governedAccount?.governance?.account || // Check governed account for proposal context
-      !wallet?.publicKey ||
+      !wallet?.publicKey || // Funder wallet
       !connection.current
     ) {
-      return {
-        serializedInstruction: '',
-        isValid: false,
-        governance: form.governedAccount?.governance,
-        prerequisiteInstructions,
-        prerequisiteInstructionsSigners,
-        additionalSerializedInstructions,
-      };
+      // Errors set by validateInstruction or basic checks below
+      if (!wallet?.connected) {
+        setFormErrors(prev => ({...prev, _error: 'Wallet not connected.' }));
+      }
+      return { serializedInstruction: '', isValid: false, governance: form.governedAccount?.governance, prerequisiteInstructions, prerequisiteInstructionsSigners, additionalSerializedInstructions: [] };
     }
 
     try {
-      // --- Funder (pays transaction fees) ---
-      const funder = wallet.publicKey;
+      // --- Funder ---
+      const funderWallet = wallet; // web3.js wallet adapter
 
-      // --- Initialize Whirlpool SDK Context and Client ---
-      const ctx = WhirlpoolContext.withProvider(
-        wallet, // Wallet pays fees and signs
-        connection.current,
-        ORCA_WHIRLPOOL_PROGRAM_ID
-      );
-      const client = buildWhirlpoolClient(ctx);
+      // --- Set Whirlpools Config ---
+      await setWhirlpoolsConfig('solanaMainnet');
 
-      // --- Prepare Mint PublicKeys ---
-      const tokenAMintPubKey = new PublicKey(form.tokenAMint);
-      const tokenBMintPubKey = new PublicKey(form.tokenBMint);
+      // --- Create RPC Client ---
+      const rpc = createSolanaRpc(connection.current.rpcEndpoint);
 
-      // --- Fetch Token Decimals ---
-      console.log('Fetching token decimals...');
-      const [tokenInfoA, tokenInfoB] = await Promise.all([
-        TokenUtil.getTokenInfo(ctx.connection, tokenAMintPubKey),
-        TokenUtil.getTokenInfo(ctx.connection, tokenBMintPubKey)
-      ]);
-      if (!tokenInfoA || !tokenInfoB) {
-        throw new Error("Failed to fetch token mint info for one or both tokens.");
+      // --- Prepare SDK Parameters ---
+      const tokenAMintAddress = form.tokenAMint as Address;
+      const tokenBMintAddress = form.tokenBMint as Address;
+      const initialPriceNumber = parseFloat(form.initialPrice); // SDK expects number
+      const tickSpacing = form.tickSpacing; // Already a number
+
+      // --- Wallet for SDK (Funder) ---
+      if (!funderWallet.signTransaction || !funderWallet.publicKey) {
+        throw new Error("Connected wallet doesn't have publicKey or signTransaction method.");
       }
-      const decimalsA = tokenInfoA.decimals;
-      const decimalsB = tokenInfoB.decimals;
-      console.log(`Token A Decimals: ${decimalsA}, Token B Decimals: ${decimalsB}`);
+      const funderSigner = funderWallet as any; // Cast funder wallet
 
-      // --- Calculate Initial SqrtPrice ---
-      console.log(`Calculating initial sqrtPrice for price: ${form.initialPrice}`);
-      const initialPriceDecimal = uiAmountToDecimal(form.initialPrice);
-      const initialPriceX64 = PriceMath.decimalToPriceX64(initialPriceDecimal, decimalsA, decimalsB);
-      const initialSqrtPriceX64 = PriceMath.priceX64ToSqrtPriceX64(initialPriceX64);
-      console.log(`Initial SqrtPriceX64 (BN): ${initialSqrtPriceX64.toString()}`);
+      // --- Call the Newer SDK function based on pool type ---
+      console.log(`Calling ${form.useConcentratedPool ? 'createConcentratedLiquidityPoolInstructions' : 'createSplashPoolInstructions'}`);
+      console.log(`Mints: A=${tokenAMintAddress}, B=${tokenBMintAddress}`);
+      console.log(`Initial Price: ${initialPriceNumber}`);
+      if (form.useConcentratedPool) {
+        console.log(`Tick Spacing: ${tickSpacing}`);
+      }
+      console.log(`Funder (passing wallet directly): ${funderWallet?.publicKey?.toBase58()}`);
+
+      let kitInstructions; // Type: Instruction from @solana/transactions
+      let poolAddress: Address | undefined = undefined; // SDK returns the potential pool address
+
+      if (form.useConcentratedPool) {
+        const result = await createConcentratedLiquidityPoolInstructions(
+          rpc,
+          tokenAMintAddress,
+          tokenBMintAddress,
+          tickSpacing,
+          initialPriceNumber,
+          funderSigner // Pass funder wallet
+        );
+        kitInstructions = result.instructions;
+        poolAddress = result.poolAddress; // Capture pool address
+      } else {
+        const result = await createSplashPoolInstructions(
+          rpc,
+          tokenAMintAddress,
+          tokenBMintAddress,
+          initialPriceNumber,
+          funderSigner // Pass funder wallet
+        );
+        kitInstructions = result.instructions;
+        poolAddress = result.poolAddress; // Capture pool address
+      }
+
+      console.log(`Received ${kitInstructions.length} instructions from SDK.`);
+      console.log(`Predicted Pool Address: ${poolAddress ?? 'N/A'}`);
 
 
-      // --- Prepare InitPoolParams ---
-      const initPoolParams: InitPoolParams = {
-        tokenMintA: tokenAMintPubKey,
-        tokenMintB: tokenBMintPubKey,
-        tickSpacing: form.tickSpacing,
-        initialSqrtPrice: initialSqrtPriceX64,
-        funder: funder, // Wallet pays the rent/fees for pool account creation
-      };
-
-      console.log('Building create pool transaction...');
-      // --- Build the Transaction using the SDK's builder ---
-      // This builder calculates the required accounts (pool PDA, fee tier PDA, etc.)
-      const createPoolTxBuilder = await buildCreatePoolTransaction(ctx, initPoolParams);
-
-      // --- Get Transaction and Signers ---
-      // Pool creation usually doesn't require extra signers beyond the funder (wallet)
-      // unless custom accounts are involved, which is not the case here.
-      const transaction = await createPoolTxBuilder.build();
-      console.log('Transaction built.');
+      // --- Attempt to Convert/Cast Instructions (RISKY) ---
+      const web3JsInstructions = kitInstructions as unknown as Web3jsTransactionInstruction[];
+      console.warn("Attempting to cast @solana/transactions instructions to @solana/web3.js format. This might fail if structures differ significantly.");
 
       // --- Serialize Instructions ---
-      // The builder includes instructions to create the pool account, fee tier account (if needed), etc.
-      transaction.instructions.forEach((ix, idx) => {
-        console.log(`Serializing instruction ${idx + 1}/${transaction.instructions.length}`);
+      const finalInstructions = [...prerequisiteInstructions, ...web3JsInstructions];
+      finalInstructions.forEach((ix, idx) => {
+        if (!ix || !ix.keys || !ix.programId) {
+          console.error("Instruction structure seems invalid after casting:", ix);
+          throw new Error(`Instruction at index ${idx} has invalid structure after casting.`);
+        }
+        console.log(`Serializing instruction ${idx + 1}/${finalInstructions.length}`);
         additionalSerializedInstructions.push(serializeInstructionToBase64(ix));
       });
 
@@ -235,79 +230,30 @@ export default function CreatePool({
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
       console.error('Error creating Orca pool instruction:', error);
-      setFormErrors({ _error: `Failed to create instruction: ${errorMessage}` });
-      return {
-        serializedInstruction: '',
-        isValid: false,
-        governance: form.governedAccount?.governance,
-        prerequisiteInstructions,
-        prerequisiteInstructionsSigners,
-        additionalSerializedInstructions: [], // Clear on error
-      };
+      if (errorMessage.includes("signTransaction")) {
+        setFormErrors({ _error: `Wallet signing function might be incompatible: ${errorMessage}` });
+      } else if (errorMessage.includes("serializeInstructionToBase64") || errorMessage.includes("invalid structure")) {
+        setFormErrors({ _error: `Failed to serialize instructions - format mismatch likely: ${errorMessage}` });
+      } else {
+        setFormErrors({ _error: `Failed to create instruction: ${errorMessage}` });
+      }
+      return { serializedInstruction: '', isValid: false, governance: form.governedAccount?.governance, prerequisiteInstructions: [], prerequisiteInstructionsSigners: [], additionalSerializedInstructions: [] };
     }
 
     // --- Return UiInstruction ---
     return {
       serializedInstruction: '', // Keep empty as per pattern
       isValid: true,
-      governance: form.governedAccount?.governance, // Pass governance for proposal context
-      prerequisiteInstructions, // Should be empty as builder handles setup
-      prerequisiteInstructionsSigners, // Should be empty unless builder returns some
+      governance: form.governedAccount?.governance,
+      prerequisiteInstructions: [],
+      prerequisiteInstructionsSigners,
       additionalSerializedInstructions,
-      chunkBy: 2, // Pool creation might be 2-3 instructions. Adjust if needed.
+      chunkBy: 2, // Adjust chunk size as needed (pool creation is often 2-3 instructions)
     };
   }
 
-  // --- Form Inputs Definition ---
-  const inputs: InstructionInput[] = [
-    {
-      // Keep this input for the proposal pattern, even if not directly used in the IX params
-      label: 'Governance Account (For Proposal)',
-      tooltip: 'Select the governance account context for this proposal item.',
-      initialValue: form.governedAccount,
-      name: 'governedAccount',
-      type: InstructionInputType.GOVERNED_ACCOUNT,
-      shouldBeGoverned,
-      governance,
-      options: assetAccounts,
-    },
-    {
-      label: 'Token A Mint',
-      tooltip: 'The mint address of the first token in the pair (e.g., USDC).',
-      initialValue: form.tokenAMint,
-      name: 'tokenAMint',
-      type: InstructionInputType.INPUT,
-      inputType: 'text',
-    },
-    {
-      label: 'Token B Mint',
-      tooltip: 'The mint address of the second token in the pair (e.g., ORCA).',
-      initialValue: form.tokenBMint,
-      name: 'tokenBMint',
-      type: InstructionInputType.INPUT,
-      inputType: 'text',
-    },
-    {
-      label: 'Initial Price',
-      tooltip: 'The starting price of Token A denominated in Token B (e.g., if A=ORCA, B=USDC, price 1.5 means 1 ORCA = 1.5 USDC).',
-      initialValue: form.initialPrice,
-      name: 'initialPrice',
-      type: InstructionInputType.INPUT,
-      inputType: 'text', // Use text for Decimal precision
-    },
-    {
-      label: 'Tick Spacing',
-      tooltip: `Determines the fee tier and price granularity. Valid options: ${VALID_TICK_SPACINGS.join(', ')}. Lower values for stable pairs, higher for volatile pairs.`,
-      initialValue: form.tickSpacing,
-      name: 'tickSpacing',
-      type: InstructionInputType.SELECT, // Use SELECT for predefined options
-      options: VALID_TICK_SPACINGS.map(ts => ({ name: `${ts} (Fee: ${getFeeTierFromTickSpacing(ts)}%)`, value: ts })),
-    },
-  ];
-
   // Helper to map tick spacing to fee tier for display
   function getFeeTierFromTickSpacing(tickSpacing: number): string {
-    // Reference: https://dev.orca.so/legacy-whirlpools/overview/tick-spacing-and-fees
     switch (tickSpacing) {
       case 1: return "0.01";
       case 8: return "0.05";
@@ -316,6 +262,64 @@ export default function CreatePool({
       default: return "Unknown";
     }
   }
+
+  // --- Form Inputs Definition ---
+  const inputs: InstructionInput[] = [
+    {
+      label: 'Governance Account (For Proposal)',
+      // tooltip: 'Select the governance account context for this proposal item.', // Add back if type allows
+      initialValue: form.governedAccount,
+      name: 'governedAccount',
+      type: InstructionInputType.GOVERNED_ACCOUNT,
+      shouldBeGoverned,
+      governance,
+      options: assetAccounts, // Use all asset accounts for context? Or filter?
+    },
+    {
+      label: 'Token A Mint',
+      // tooltip: 'The mint address of the first token in the pair (e.g., USDC).', // Add back if type allows
+      initialValue: form.tokenAMint,
+      name: 'tokenAMint',
+      type: InstructionInputType.INPUT,
+      inputType: 'text',
+    },
+    {
+      label: 'Token B Mint',
+      // tooltip: 'The mint address of the second token in the pair (e.g., ORCA).', // Add back if type allows
+      initialValue: form.tokenBMint,
+      name: 'tokenBMint',
+      type: InstructionInputType.INPUT,
+      inputType: 'text',
+    },
+    {
+      label: 'Initial Price',
+      // tooltip: 'The starting price of Token A denominated in Token B.', // Add back if type allows
+      initialValue: form.initialPrice,
+      name: 'initialPrice',
+      type: InstructionInputType.INPUT,
+      inputType: 'text', // Use text for Decimal precision
+    },
+    {
+      label: 'Use Concentrated Pool?',
+      // tooltip: 'Check this to create a Concentrated Liquidity pool (requires Tick Spacing). If unchecked, a simpler Splash pool is created.', // Add back if type allows
+      initialValue: form.useConcentratedPool,
+      name: 'useConcentratedPool',
+      type: InstructionInputType.SWITCH,
+    },
+    // Conditionally show Tick Spacing only for Concentrated pools
+    ...(form.useConcentratedPool
+      ? [
+        {
+          label: 'Tick Spacing',
+          // tooltip: `Determines the fee tier and price granularity. Lower values for stable pairs, higher for volatile pairs.`, // Add back if type allows
+          initialValue: form.tickSpacing,
+          name: 'tickSpacing',
+          type: InstructionInputType.SELECT, // Use SELECT for predefined options
+          options: VALID_TICK_SPACINGS.map(ts => ({ name: `${ts} (Fee: ${getFeeTierFromTickSpacing(ts)}%)`, value: ts })),
+        },
+      ]
+      : []),
+  ];
 
 
   // --- useEffect to Register Instruction ---
@@ -327,7 +331,7 @@ export default function CreatePool({
       },
       index
     );
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- Re-register whenever form state changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form, governance, index, handleSetInstructions]); // Include all dependencies
 
   // --- Render Component ---
