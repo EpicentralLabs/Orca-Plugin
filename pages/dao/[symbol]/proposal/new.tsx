@@ -459,20 +459,7 @@ const New = () => {
   //
   // by default, components are created with index/governance attributes
   // if a component needs specials attributes, use componentBuilderFunction object
-  const instructionMap: {
-    [key in Instructions]:
-      | ((props: {
-          index: number
-          governance: ProgramAccount<Governance> | null
-        }) => JSX.Element | null)
-      | {
-          componentBuilderFunction: (props: {
-            index: number
-            governance: ProgramAccount<Governance> | null
-          }) => JSX.Element | null
-        }
-      | null
-  } = useMemo(
+  const instructionMap = useMemo(
     () => ({
       [Instructions.Burn]: BurnTokens,
       [Instructions.Transfer]: SplTokenTransfer,
@@ -527,15 +514,15 @@ const New = () => {
       [Instructions.CreateSolendObligationAccount]: CreateObligationAccount,
       [Instructions.InitSolendObligationAccount]: InitObligationAccount,
       [Instructions.DepositReserveLiquidityAndObligationCollateral]:
-        DepositReserveLiquidityAndObligationCollateral,
+      DepositReserveLiquidityAndObligationCollateral,
       [Instructions.WithdrawObligationCollateralAndRedeemReserveLiquidity]:
-        WithdrawObligationCollateralAndRedeemReserveLiquidity,
+      WithdrawObligationCollateralAndRedeemReserveLiquidity,
       [Instructions.PsyFinanceMintAmericanOptions]:
-        PsyFinanceMintAmericanOptions,
+      PsyFinanceMintAmericanOptions,
       [Instructions.PsyFinanceBurnWriterForQuote]:
-        PsyFinanceBurnWriterTokenForQuote,
+      PsyFinanceBurnWriterTokenForQuote,
       [Instructions.PsyFinanceClaimUnderlyingPostExpiration]:
-        PsyFinanceClaimUnderlyingPostExpiration,
+      PsyFinanceClaimUnderlyingPostExpiration,
       [Instructions.PsyFinanceExerciseOption]: PsyFinanceExerciseOption,
       [Instructions.SwitchboardFundOracle]: SwitchboardFundOracle,
       [Instructions.WithdrawFromOracle]: WithdrawFromOracle,
@@ -544,7 +531,7 @@ const New = () => {
       [Instructions.RealmConfig]: RealmConfig,
       [Instructions.CreateNftPluginRegistrar]: CreateNftPluginRegistrar,
       [Instructions.CreateNftPluginMaxVoterWeight]:
-        CreateNftPluginMaxVoterWeightRecord,
+      CreateNftPluginMaxVoterWeightRecord,
       [Instructions.ConfigureNftPluginCollection]: ConfigureNftPluginCollection,
       [Instructions.CloseTokenAccount]: CloseTokenAccount,
       [Instructions.CloseMultipleTokenAccounts]: CloseMultipleTokenAccounts,
@@ -571,7 +558,7 @@ const New = () => {
       [Instructions.SerumInitUser]: InitUser,
       [Instructions.TokenWithdrawFees]: WithdrawFees,
       [Instructions.SerumGrantLockedSRM]: {
-        componentBuilderFunction: ({ index, governance }) => (
+        componentBuilderFunction: ({ index, governance }: { index: number; governance: ProgramAccount<Governance> | null }) => (
           <GrantForm
             index={index}
             governance={governance}
@@ -581,7 +568,7 @@ const New = () => {
         ),
       },
       [Instructions.SerumGrantLockedMSRM]: {
-        componentBuilderFunction: ({ index, governance }) => (
+        componentBuilderFunction: ({ index, governance }: { index: number; governance: ProgramAccount<Governance> | null }) => (
           <GrantForm
             index={index}
             governance={governance}
@@ -591,7 +578,7 @@ const New = () => {
         ),
       },
       [Instructions.SerumGrantVestSRM]: {
-        componentBuilderFunction: ({ index, governance }) => (
+        componentBuilderFunction: ({ index, governance }: { index: number; governance: ProgramAccount<Governance> | null }) => (
           <GrantForm
             index={index}
             governance={governance}
@@ -601,7 +588,7 @@ const New = () => {
         ),
       },
       [Instructions.SerumGrantVestMSRM]: {
-        componentBuilderFunction: ({ index, governance }) => (
+        componentBuilderFunction: ({ index, governance }: { index: number; governance: ProgramAccount<Governance> | null }) => (
           <GrantForm
             index={index}
             governance={governance}

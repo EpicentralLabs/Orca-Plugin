@@ -3668,6 +3668,15 @@
   resolved "https://registry.yarnpkg.com/@orca-so/whirlpools-core/-/whirlpools-core-1.0.4.tgz#398e5c4e370a527e0b00bd8fe7587082df75548f"
   integrity sha512-+Yg8zuKS7aR0ydOMR0fzEg+PkgqEBWlqj8o5nvZmcwnZ0qF0O2CU++pEef3/RhUxUPPrHjkJLY6uSh+qx0/MIA==
 
+"@orca-so/whirlpools-sdk@0.13.19":
+  version "0.13.19"
+  resolved "https://registry.yarnpkg.com/@orca-so/whirlpools-sdk/-/whirlpools-sdk-0.13.19.tgz#b0880567661378f25f225a739eae66d569da2fda"
+  integrity sha512-xA0qE1oSF2DDt8oD/lM7fpcoVOfUhzMpwMvQzo5BvA+2dXjC7z2aqh/jLdNwV0XxBUaJ68m1ZW92YdaJhVC4Fg==
+  dependencies:
+    "@orca-so/common-sdk" "0.6.11"
+    decimal.js "^10.5.0"
+    tiny-invariant "^1.3.1"
+
 "@orca-so/whirlpools@1.1.0":
   version "1.1.0"
   resolved "https://registry.yarnpkg.com/@orca-so/whirlpools/-/whirlpools-1.1.0.tgz#53c360bdd0658836521eae4b7cac4b66c2611b4c"
