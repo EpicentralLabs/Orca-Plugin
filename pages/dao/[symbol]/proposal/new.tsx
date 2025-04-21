@@ -362,8 +362,8 @@ const New = () => {
               .map((x) => ({
                 data: x
                   ? getInstructionDataFromBase64(
-                      typeof x === 'string' ? x : x.serializedInstruction,
-                    )
+                    typeof x === 'string' ? x : x.serializedInstruction,
+                  )
                   : null,
                 ...getDefaultInstructionProps(instruction, governance),
                 holdUpTime:
@@ -459,7 +459,20 @@ const New = () => {
   //
   // by default, components are created with index/governance attributes
   // if a component needs specials attributes, use componentBuilderFunction object
-  const instructionMap = useMemo(
+  const instructionMap: {
+    [key in Instructions]:
+    | ((props: {
+    index: number
+    governance: ProgramAccount<Governance> | null
+  }) => JSX.Element | null)
+    | {
+    componentBuilderFunction: (props: {
+      index: number
+      governance: ProgramAccount<Governance> | null
+    }) => JSX.Element | null
+  }
+    | null
+  } = useMemo(
     () => ({
       [Instructions.Burn]: BurnTokens,
       [Instructions.Transfer]: SplTokenTransfer,
@@ -558,7 +571,7 @@ const New = () => {
       [Instructions.SerumInitUser]: InitUser,
       [Instructions.TokenWithdrawFees]: WithdrawFees,
       [Instructions.SerumGrantLockedSRM]: {
-        componentBuilderFunction: ({ index, governance }: { index: number; governance: ProgramAccount<Governance> | null }) => (
+        componentBuilderFunction: ({ index, governance }) => (
           <GrantForm
             index={index}
             governance={governance}
@@ -568,7 +581,7 @@ const New = () => {
         ),
       },
       [Instructions.SerumGrantLockedMSRM]: {
-        componentBuilderFunction: ({ index, governance }: { index: number; governance: ProgramAccount<Governance> | null }) => (
+        componentBuilderFunction: ({ index, governance }) => (
           <GrantForm
             index={index}
             governance={governance}
@@ -578,7 +591,7 @@ const New = () => {
         ),
       },
       [Instructions.SerumGrantVestSRM]: {
-        componentBuilderFunction: ({ index, governance }: { index: number; governance: ProgramAccount<Governance> | null }) => (
+        componentBuilderFunction: ({ index, governance }) => (
           <GrantForm
             index={index}
             governance={governance}
@@ -588,7 +601,7 @@ const New = () => {
         ),
       },
       [Instructions.SerumGrantVestMSRM]: {
-        componentBuilderFunction: ({ index, governance }: { index: number; governance: ProgramAccount<Governance> | null }) => (
+        componentBuilderFunction: ({ index, governance }) => (
           <GrantForm
             index={index}
             governance={governance}
@@ -616,9 +629,9 @@ const New = () => {
 
   const getCurrentInstruction = useCallback(
     ({
-      typeId,
-      index,
-    }: {
+       typeId,
+       index,
+     }: {
       typeId?: Instructions
       index: number
     }): JSX.Element => {
@@ -752,7 +765,7 @@ const New = () => {
               </div>
               <div className="flex flex-col items-center justify-evenly grow basis-0">
                 <div
-                  className="bg-[#10B981] text-black flex flex-row gap-2 text-sm 
+                  className="bg-[#10B981] text-black flex flex-row gap-2 text-sm
                 items-center justify-center px-2 py-1 rounded-md mb-2 w-full"
                 >
                   <TableOfContents />
