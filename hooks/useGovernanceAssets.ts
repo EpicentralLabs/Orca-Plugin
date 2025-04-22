@@ -381,11 +381,11 @@ export default function useGovernanceAssets() {
       isVisible: canUseTransferInstruction,
       packageId: PackageEnum.Common,
     },
-    [Instructions.TokenWithdrawFees]: {
-      name: 'Token 2022 withdraw fees',
-      packageId: PackageEnum.Common,
-      isVisible: canUseTransferInstruction,
-    },
+    // [Instructions.TokenWithdrawFees]: {
+    //   name: 'Token 2022 withdraw fees',
+    //   packageId: PackageEnum.Common,
+    //   isVisible: canUseTransferInstruction,
+    // },
     /*
       ██████  ██    ██  █████  ██          ███████ ██ ███    ██  █████  ███    ██  ██████ ███████
       ██   ██ ██    ██ ██   ██ ██          ██      ██ ████   ██ ██   ██ ████   ██ ██      ██
@@ -641,10 +641,10 @@ export default function useGovernanceAssets() {
 
     /*
       ██████  ███████ ██    ██  ███████ ██ ███    ██  █████  ███    ██  ██████ ███████
-      ██   ██ ██       ██  ██   ██      ██ ████   ██ ██   ██ ████   ██ ██      ██     
-      ██████  ███████   ████    █████   ██ ██ ██  ██ ███████ ██ ██  ██ ██      █████  
-      ██           ██    ██     ██      ██ ██  ██ ██ ██   ██ ██  ██ ██ ██      ██      
-      ██      ███████    ██     ██      ██ ██   ████ ██   ██ ██   ████  ██████ ███████ 
+      ██   ██ ██       ██  ██   ██      ██ ████   ██ ██   ██ ████   ██ ██      ██
+      ██████  ███████   ████    █████   ██ ██ ██  ██ ███████ ██ ██  ██ ██      █████
+      ██           ██    ██     ██      ██ ██  ██ ██ ██   ██ ██  ██ ██ ██      ██
+      ██      ███████    ██     ██      ██ ██   ████ ██   ██ ██   ████  ██████ ███████
     */
 
     [Instructions.PsyFinanceMintAmericanOptions]: {
@@ -750,11 +750,11 @@ export default function useGovernanceAssets() {
     },
 
     /*
-    ███████ ██    ██ ███    ███ ███    ███ ███████ ████████ ██████  ██    ██ 
-    ██       ██  ██  ████  ████ ████  ████ ██         ██    ██   ██  ██  ██  
-    ███████   ████   ██ ████ ██ ██ ████ ██ █████      ██    ██████    ████   
-         ██    ██    ██  ██  ██ ██  ██  ██ ██         ██    ██   ██    ██    
-    ███████    ██    ██      ██ ██      ██ ███████    ██    ██   ██    ██    
+    ███████ ██    ██ ███    ███ ███    ███ ███████ ████████ ██████  ██    ██
+    ██       ██  ██  ████  ████ ████  ████ ██         ██    ██   ██  ██  ██
+    ███████   ████   ██ ████ ██ ██ ████ ██ █████      ██    ██████    ████
+         ██    ██    ██  ██  ██ ██  ██  ██ ██         ██    ██   ██    ██
+    ███████    ██    ██      ██ ██      ██ ███████    ██    ██   ██    ██
     */
     [Instructions.SymmetryCreateBasket]: {
       name: 'Create Basket',
@@ -773,11 +773,11 @@ export default function useGovernanceAssets() {
       packageId: PackageEnum.Symmetry,
     },
     /*
-    ███████  ██████  ██    ██  █████  ██████  ███████ 
-    ██      ██    ██ ██    ██ ██   ██ ██   ██ ██      
-    ███████ ██    ██ ██    ██ ███████ ██   ██ ███████ 
-         ██ ██ ▄▄ ██ ██    ██ ██   ██ ██   ██      ██ 
-    ███████  ██████   ██████  ██   ██ ██████  ███████ 
+    ███████  ██████  ██    ██  █████  ██████  ███████
+    ██      ██    ██ ██    ██ ██   ██ ██   ██ ██
+    ███████ ██    ██ ██    ██ ███████ ██   ██ ███████
+         ██ ██ ▄▄ ██ ██    ██ ██   ██ ██   ██      ██
+    ███████  ██████   ██████  ██   ██ ██████  ███████
     */
     [Instructions.SquadsMeshAddMember]: {
       name: 'Mesh Add Member',
@@ -861,16 +861,6 @@ export default function useGovernanceAssets() {
       packageId: PackageEnum.Orca,
     },
 
-    [Instructions.SwapTokens]: {
-      name: 'Swap Tokens',
-      packageId: PackageEnum.Orca,
-    },
-
-    [Instructions.QueryPoolStats]: {
-      name: 'Query Pool Stats',
-      packageId: PackageEnum.Orca,
-    },
-
     [Instructions.UpdatePoolFee]: {
       name: 'Update Pool Fee',
       packageId: PackageEnum.Orca,
@@ -891,10 +881,6 @@ export default function useGovernanceAssets() {
       packageId: PackageEnum.Orca,
     },
 
-    [Instructions.SimulateSwap]: {
-      name: 'Simulate Swap',
-      packageId: PackageEnum.Orca,
-    },
   }
 
   const availablePackages: PackageType[] = Object.entries(packages)
