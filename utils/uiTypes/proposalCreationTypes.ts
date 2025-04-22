@@ -410,17 +410,13 @@ export enum Instructions {
   SymmetryEditBasket,
   SymmetryDeposit,
   SymmetryWithdraw,
-  TokenWithdrawFees,
   CreateOrcaPool,
   AddLiquidity,
   RemoveLiquidity,
-  SwapTokens,
-  QueryPoolStats,
   UpdatePoolFee,
   CreatePosition,
   ClosePosition,
-  CollectFees,
-  SimulateSwap
+  CollectFees
 }
 export interface ComponentInstructionData {
   governedAccount?: ProgramAccount<Governance> | undefined
