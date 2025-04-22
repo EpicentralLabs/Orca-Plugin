@@ -153,6 +153,12 @@ import PlaceLimitOrder from './components/instructions/Manifest/PlaceLimitOrder'
 import SettleToken from './components/instructions/Manifest/SettleToken'
 import CancelLimitOrder from './components/instructions/Manifest/CancelLimitOrder'
 import WithdrawFees from './components/instructions/Token2022/WithdrawFees'
+import ClosePosition from './components/instructions/Orca/ClosePosition'
+import CollectFees from './components/instructions/Orca/CollectFees'
+import CreatePosition from './components/instructions/Orca/CreatePosition'
+import RemoveLiquidity from './components/instructions/Orca/RemoveLiquidity'
+import AddLiquidity from './components/instructions/Orca/AddLiquidity'
+import CreatePool from './components/instructions/Orca/CreatePool'
 // import SquadsV4RemoveMember from './components/instructions/Squads/SquadsV4RemoveMember'
 
 const TITLE_LENGTH_LIMIT = 130
@@ -578,30 +584,20 @@ const New = () => {
              [Instructions.TransferDomainName]: TransferDomainName,
              [Instructions.SerumInitUser]: InitUser,
              // [Instructions.TokenWithdrawFees]: WithdrawFees,
-             [Instructions.SerumGrantLockedSRM],
-             [Instructions.CreateOrcaPool]: CreateOrcaPool,
+             [Instructions.SerumGrantLockedSRM]: null,
+             [Instructions.CreateOrcaPool]: CreatePool, 
              [Instructions.AddLiquidity]: AddLiquidity,
              [Instructions.RemoveLiquidity]: RemoveLiquidity,
-             [Instructions.UpdatePoolFee]: UpdatePoolFee,
              [Instructions.CreatePosition]: CreatePosition,
              [Instructions.ClosePosition]: ClosePosition,
-             [Instructions.CollectFees]: CollectFees, {
+             [Instructions.CollectFees]: CollectFees,
+             [Instructions.SerumGrantLockedMSRM]: {
         componentBuilderFunction: ({ index, governance }) => (
           <GrantForm
             index={index}
             governance={governance}
             isLocked={true}
             isMsrm={false}
-          />
-        ),
-      },
-      [Instructions.SerumGrantLockedMSRM]: {
-        componentBuilderFunction: ({ index, governance }) => (
-          <GrantForm
-            index={index}
-            governance={governance}
-            isLocked={true}
-            isMsrm={true}
           />
         ),
       },
@@ -628,7 +624,6 @@ const New = () => {
       [Instructions.SerumUpdateGovConfigParams]: UpdateConfigParams,
       [Instructions.SerumUpdateGovConfigAuthority]: UpdateConfigAuthority,
       [Instructions.JoinDAO]: JoinDAO,
-      [Instructions.WithdrawFromDAO]: WithdrawDAO,
       [Instructions.AddKeyToDID]: AddKeyToDID,
       [Instructions.RemoveKeyFromDID]: RemoveKeyFromDID,
       [Instructions.AddServiceToDID]: AddServiceToDID,
@@ -640,6 +635,7 @@ const New = () => {
       [Instructions.SymmetryDeposit]: SymmetryDeposit,
       [Instructions.SymmetryWithdraw]: SymmetryWithdraw,
     }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [governance?.pubkey?.toBase58()],
   )
 

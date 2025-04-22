@@ -70,7 +70,7 @@
     "@nivo/core": "0.79.0",
     "@onsol/tldparser": "0.6.7",
     "@orca-so/common-sdk": "0.6.11",
-    "@orca-so/whirlpools": "1.1.0",
+    "@orca-so/whirlpools": "1.1.2",
     "@orca-so/whirlpools-sdk": "0.13.19",
     "@parcl-oss/staking": "0.0.2",
     "@project-serum/common": "0.0.1-beta.3",

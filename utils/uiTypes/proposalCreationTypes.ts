@@ -413,7 +413,6 @@ export enum Instructions {
   CreateOrcaPool,
   AddLiquidity,
   RemoveLiquidity,
-  UpdatePoolFee,
   CreatePosition,
   ClosePosition,
   CollectFees
