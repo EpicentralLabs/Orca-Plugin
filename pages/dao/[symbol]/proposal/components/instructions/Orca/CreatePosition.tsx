@@ -1,417 +1,318 @@
 import { useContext, useEffect, useState } from 'react';
 import * as yup from 'yup';
-import {
-  ProgramAccount,
-  Governance,
-  serializeInstructionToBase64,
-} from '@solana/spl-governance';
+import { ProgramAccount, Governance, serializeInstructionToBase64 } from '@solana/spl-governance';
 import { validateInstruction } from '@utils/instructionTools';
 import { UiInstruction } from '@utils/uiTypes/proposalCreationTypes';
 import {
   PublicKey,
   Connection,
-  TransactionInstruction as Web3jsTransactionInstruction, // Alias for clarity
+  TransactionInstruction,
   Keypair,
-  Transaction, // Keep web3.js Transaction type
-  ConfirmOptions,
+  Transaction,
   SystemProgram,
-  AccountInfo,
-  VersionedTransaction,
+  SYSVAR_RENT_PUBKEY
 } from '@solana/web3.js';
 import { NewProposalContext } from '../../../new';
 import InstructionForm, { InstructionInput } from '../FormCreator';
 import { InstructionInputType } from '../inputInstructionType';
 import { AssetAccount } from '@utils/uiTypes/assets';
-import useWalletOnePointOh from '@hooks/useWalletOnePointOh'; // Your existing web3.js wallet hook
-import { useRealmQuery } from '@hooks/queries/realm';
+import useWalletOnePointOh from '@hooks/useWalletOnePointOh';
 import useGovernanceAssets from '@hooks/useGovernanceAssets';
-import useLegacyConnectionContext from '@hooks/useLegacyConnectionContext'; // Your existing web3.js connection hook
-
-// --- Import from NEWER Orca SDK ---
+import useLegacyConnectionContext from '@hooks/useLegacyConnectionContext';
+import { AnchorProvider } from '@coral-xyz/anchor';
 import {
-  openPositionInstructions, // For concentrated liquidity
-  openFullRangePositionInstructions, // For "Splash" like full range
-  setWhirlpoolsConfig, // Function to set config address (devnet/mainnet)
-} from '@orca-so/whirlpools';
-
-// --- Import from @solana/kit for RPC and Address ---
-import { createSolanaRpc } from '@solana/kit'; // Use kit's RPC creator
-import { Address } from '@solana/addresses'; // Newer SDK uses Address type (branded string)
-
-// --- Import supporting types/libs ---
-import { BN } from 'bn.js';
+  WhirlpoolContext,
+  buildWhirlpoolClient,
+  ORCA_WHIRLPOOL_PROGRAM_ID,
+  PriceMath,
+  TickUtil,
+  PoolUtil,
+  PDAUtil,
+  IGNORE_CACHE,
+  ParsableWhirlpool,
+  WhirlpoolIx,
+  WhirlpoolData,
+  TokenAmounts, // Import TokenAmounts type
+} from '@orca-so/whirlpools-sdk';
+import { BN } from 'bn.js'; // BN is used as a value/constructor here
 import { Decimal } from 'decimal.js';
-// Removed getMint import from @solana/spl-token
-import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import { Percentage } from '@orca-so/common-sdk';
+import { TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } from '@solana/spl-token';
 
-// --- Form State Interface ---
-interface CreatePositionForm {
-  governedAccount?: AssetAccount; // The owner of the position NFT
-  poolAddress: string;
-  tokenAAmount: string; // Use string for UI input, convert to bigint
-  tokenBAmount: string; // Use string for UI input, convert to bigint
-  lowerPrice: string; // Use string for UI input, parse to number
-  upperPrice: string; // Use string for UI input, parse to number
-  slippageBps: number; // Basis points (e.g., 50 for 0.5%)
-  isFullRange: boolean; // Replaces 'splash'
+// Define constants locally
+const METAPLEX_METADATA_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
+const ORCA_ABS_MAX_TICK_INDEX = 443636;
+const ORCA_ABS_MIN_TICK_INDEX = -443636;
+
+
+// --- Workaround Helper Functions (Replace if @solana/spl-token issue is fixed) ---
+
+async function findAssociatedTokenAddress(
+  walletAddress: PublicKey,
+  tokenMintAddress: PublicKey,
+  allowOwnerOffCurve = false
+): Promise<PublicKey> {
+  // This is the standard derivation, ensure it works in your env
+  return (await PublicKey.findProgramAddress(
+    [
+      walletAddress.toBuffer(),
+      TOKEN_PROGRAM_ID.toBuffer(),
+      tokenMintAddress.toBuffer(),
+    ],
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  ))[0];
 }
 
-// Helper to convert UI amount (string) to bigint based on mint decimals
-// Uses manual parsing of Mint account data instead of getMint
-async function uiAmountToBigInt(
+function createAtaInstruction(
+  payer: PublicKey,
+  associatedToken: PublicKey,
+  owner: PublicKey,
+  mint: PublicKey
+): TransactionInstruction {
+  // This is the standard instruction structure
+  const keys = [
+    { pubkey: payer, isSigner: true, isWritable: true },
+    { pubkey: associatedToken, isSigner: false, isWritable: true },
+    { pubkey: owner, isSigner: false, isWritable: false },
+    { pubkey: mint, isSigner: false, isWritable: false },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+  ];
+  return new TransactionInstruction({
+    keys,
+    programId: ASSOCIATED_TOKEN_PROGRAM_ID,
+    data: Buffer.from([]),
+  });
+}
+
+async function getOrCreateATAInstructionWorkaround(
   connection: Connection,
-  amount: string,
-  mint: PublicKey // Ensure mint is not null when calling
-): Promise<bigint> {
-  try {
-    console.log(`Fetching account info for mint: ${mint.toBase58()}`);
-    const mintAccountInfo = await connection.getAccountInfo(mint);
-    if (!mintAccountInfo) {
-      throw new Error(`Mint account not found: ${mint.toBase58()}`);
-    }
-    if (mintAccountInfo.data.length < 82) { // Mint layout size is 82 bytes
-      throw new Error(`Mint account data length too short: ${mintAccountInfo.data.length}`);
-    }
-    // Decimals field is a single byte at offset 44
-    const decimals = mintAccountInfo.data.readUInt8(44);
-    console.log(`Decimals for mint ${mint.toBase58()}: ${decimals}`);
-
-    const amountDecimal = new Decimal(amount || '0');
-    const baseAmount = amountDecimal.mul(new Decimal(10).pow(decimals));
-    return BigInt(baseAmount.toFixed(0));
-  } catch (error) {
-    console.error("Error converting amount to BigInt:", error);
-    throw new Error(`Failed to convert amount "${amount}" for mint ${mint?.toBase58()}: ${error instanceof Error ? error.message : String(error)}`);
+  mint: PublicKey,
+  owner: PublicKey,
+  funder: PublicKey,
+  allowOwnerOffCurve = true
+): Promise<{ address: PublicKey; instruction: TransactionInstruction | null }> {
+  const address = await findAssociatedTokenAddress(owner, mint, allowOwnerOffCurve);
+  const accountInfo = await connection.getAccountInfo(address);
+  let instruction: TransactionInstruction | null = null;
+  if (!accountInfo) {
+    console.log(`Creating ATA instruction (workaround) for mint ${mint.toBase58()} and owner ${owner.toBase58()}`);
+    instruction = createAtaInstruction(funder, address, owner, mint);
   }
+  return { address, instruction };
+}
+// --- End Workaround Helper Functions ---
+
+
+interface CreatePositionForm {
+  governedAccount?: AssetAccount; // Owner of the position NFT
+  poolAddress: string;
+  tokenAAmount: string;
+  tokenBAmount: string;
+  lowerPrice: string;
+  upperPrice: string;
+  slippageBps: number;
+  isFullRange: boolean;
+}
+
+const uiAmountToDecimal = (amount: string): Decimal => {
+  try { return new Decimal(amount || '0'); } catch { return new Decimal(0); }
+};
+
+// Correct return type annotation to BN (instance type)
+// @ts-ignore
+const decimalAmountToBN = (decimalAmount: Decimal, decimals: number): BN => {
+  // BN is a constructor here
+  return new BN(decimalAmount.mul(new Decimal(10).pow(decimals)).toFixed(0));
+};
+
+async function getMintDecimals(connection: Connection, mint: PublicKey): Promise<number> {
+  const mintInfo = await connection.getAccountInfo(mint);
+  if (!mintInfo) throw new Error(`Mint not found: ${mint.toBase58()}`);
+  if (mintInfo.data.length !== 82) throw new Error("Invalid mint account size");
+  return mintInfo.data.readUInt8(44);
 }
 
 
-// --- React Component ---
-export default function CreatePosition({
-                                         index,
-                                         governance,
-                                       }: {
-  index: number;
-  governance: ProgramAccount<Governance> | null;
-}) {
-  // --- Hooks ---
+export default function CreatePosition({ index, governance }: { index: number; governance: ProgramAccount<Governance> | null; }) {
   const { handleSetInstructions } = useContext(NewProposalContext);
-  const connection = useLegacyConnectionContext(); // Your web3.js connection
-  const realm = useRealmQuery().data?.result;
+  const connection = useLegacyConnectionContext();
   const { assetAccounts } = useGovernanceAssets();
-  const wallet = useWalletOnePointOh(); // Your web3.js wallet adapter
-
-  // --- State ---
+  const wallet = useWalletOnePointOh();
   const [form, setForm] = useState<CreatePositionForm>({
-    governedAccount: undefined,
-    poolAddress: '',
-    tokenAAmount: '0',
-    tokenBAmount: '0',
-    lowerPrice: '0',
-    upperPrice: '0',
-    isFullRange: false,
-    slippageBps: 50, // Default 0.5%
+    poolAddress: '', tokenAAmount: '0', tokenBAmount: '0', lowerPrice: '0', upperPrice: '0', isFullRange: false, slippageBps: 50,
   });
   const [formErrors, setFormErrors] = useState({});
   const shouldBeGoverned = !!(index !== 0 && governance);
 
-  // --- Validation Schema ---
-  // (Schema remains the same)
   const schema = yup.object().shape({
-    governedAccount: yup
-      .object()
-      .nullable()
-      .required('Governance account (Position Owner) is required'),
-    poolAddress: yup
-      .string()
-      .required('Pool address is required')
-      .test('is-pubkey', 'Invalid Pool address', (value) => {
-        try { new PublicKey(value || ''); return true; } catch (e) { return false; }
-      }),
-    tokenAAmount: yup
-      .string()
-      .test('is-positive-or-zero', 'Amount must be >= 0', (val) => !val || !isNaN(parseFloat(val)) && parseFloat(val) >= 0)
-      .required('Token A amount is required'),
-    tokenBAmount: yup
-      .string()
-      .test('is-positive-or-zero', 'Amount must be >= 0', (val) => !val || !isNaN(parseFloat(val)) && parseFloat(val) >= 0)
-      .required('Token B amount is required'),
-    tokenInputLogic: yup.mixed().test(
-      'one-token-amount-provided',
-      'Provide amount for Token A OR Token B (not both, unless one is 0)',
-      function() {
-        const amountA = parseFloat(this.parent.tokenAAmount || '0');
-        const amountB = parseFloat(this.parent.tokenBAmount || '0');
-        return (amountA === 0 && amountB === 0) || (amountA > 0 && amountB === 0) || (amountA === 0 && amountB > 0);
-      }
-    ),
-    lowerPrice: yup.string().when('isFullRange', {
-      is: false,
-      then: (schema) =>
-        schema
-          .required('Lower price is required for concentrated positions')
-          .test('is-positive', 'Price must be > 0', (val) => !val || !isNaN(parseFloat(val)) && parseFloat(val) > 0)
-          .test('is-less-than-upper', 'Lower price must be less than upper price', function (value) {
-            const upperPrice = parseFloat(this.parent.upperPrice || '0');
-            return parseFloat(value || '0') < upperPrice;
-          }),
-      otherwise: (schema) => schema.notRequired(),
-    }),
-    upperPrice: yup.string().when('isFullRange', {
-      is: false,
-      then: (schema) =>
-        schema
-          .required('Upper price is required for concentrated positions')
-          .test('is-positive', 'Price must be > 0', (val) => !val || !isNaN(parseFloat(val)) && parseFloat(val) > 0),
-      otherwise: (schema) => schema.notRequired(),
-    }),
-    slippageBps: yup
-      .number()
-      .transform((value) => (isNaN(value) ? 0 : value))
-      .min(0)
-      .max(10000)
-      .required('Slippage is required'),
+    governedAccount: yup.object().nullable().required('Governance account (Position Owner) is required'),
+    poolAddress: yup.string().required('Pool address required').test('is-pubkey', 'Invalid Pool address', (v) => { try { new PublicKey(v || ''); return true; } catch { return false; } }),
+    tokenAAmount: yup.string().test('is-positive-or-zero', 'Amount must be >= 0', (v) => !v || !isNaN(parseFloat(v)) && parseFloat(v) >= 0).required('Token A amount required'),
+    tokenBAmount: yup.string().test('is-positive-or-zero', 'Amount must be >= 0', (v) => !v || !isNaN(parseFloat(v)) && parseFloat(v) >= 0).required('Token B amount required'),
+    tokenAmounts: yup.mixed().test('at-least-one-positive', 'At least one token amount must be > 0', function() { return parseFloat(this.parent.tokenAAmount || '0') > 0 || parseFloat(this.parent.tokenBAmount || '0') > 0; }),
+    lowerPrice: yup.string().when('isFullRange', { is: false, then: (s) => s.required('Lower price required').test('is-positive', 'Price must be > 0', (v) => !v || !isNaN(parseFloat(v)) && parseFloat(v) > 0).test('is-less-than-upper', 'Lower price must be < upper', function (v) { return new Decimal(v || '0').lt(new Decimal(this.parent.upperPrice || '0')); }), otherwise: (s) => s.notRequired(), }),
+    upperPrice: yup.string().when('isFullRange', { is: false, then: (s) => s.required('Upper price required').test('is-positive', 'Price must be > 0', (v) => !v || !isNaN(parseFloat(v)) && parseFloat(v) > 0), otherwise: (s) => s.notRequired(), }),
+    slippageBps: yup.number().transform((v) => (isNaN(v) ? 0 : v)).min(0).max(10000).required('Slippage required'),
   });
 
-  // --- getInstruction Implementation ---
   async function getInstruction(): Promise<UiInstruction> {
     setFormErrors({});
     const isValid = await validateInstruction({ schema, form, setFormErrors });
-    const prerequisiteInstructions: Web3jsTransactionInstruction[] = [];
+    const prerequisiteInstructions: TransactionInstruction[] = [];
     const prerequisiteInstructionsSigners: Keypair[] = [];
+    const mainInstructions: TransactionInstruction[] = [];
     const additionalSerializedInstructions: string[] = [];
 
-    if (
-      !isValid ||
-      !form.governedAccount?.governance?.account ||
-      !form.governedAccount?.extensions.transferAddress || // Owner address
-      !wallet?.publicKey || // Funder wallet
-      !connection.current
-    ) {
-      if (!form.governedAccount?.extensions.transferAddress && form.governedAccount) {
-        setFormErrors(prev => ({...prev, governedAccount: 'Selected governed account does not have a valid owner address.' }));
-      }
-      if (!wallet?.connected) {
-        setFormErrors(prev => ({...prev, _error: 'Wallet not connected.' }));
-      }
-      return { serializedInstruction: '', isValid: false, governance: form.governedAccount?.governance, prerequisiteInstructions, prerequisiteInstructionsSigners, additionalSerializedInstructions: [] };
+    if (!isValid || !form.governedAccount?.governance?.account || !form.governedAccount?.extensions.transferAddress || !wallet?.publicKey || !connection.current) {
+      return { serializedInstruction: '', isValid: false, governance: form.governedAccount?.governance, prerequisiteInstructions, prerequisiteInstructionsSigners, additionalSerializedInstructions };
     }
-
-    let tokenMintA: PublicKey | null = null;
-    let tokenMintB: PublicKey | null = null;
 
     try {
-      // --- Owner & Funder ---
       const owner = form.governedAccount.extensions.transferAddress;
-      const funderWallet = wallet;
+      const funder = wallet.publicKey;
+      if (!wallet.signTransaction) throw new Error("Wallet does not support signing.");
+      const provider = new AnchorProvider(connection.current, wallet as any, AnchorProvider.defaultOptions());
+      const ctx = WhirlpoolContext.withProvider(provider, ORCA_WHIRLPOOL_PROGRAM_ID);
+      const client = buildWhirlpoolClient(ctx);
+      const poolPubkey = new PublicKey(form.poolAddress);
 
-      // --- Set Whirlpools Config ---
-      await setWhirlpoolsConfig('solanaMainnet');
+      const poolAccountInfo = await ctx.connection.getAccountInfo(poolPubkey, "confirmed");
+      if (!poolAccountInfo) throw new Error(`Whirlpool not found: ${poolPubkey.toBase58()}`);
+      const poolData = ParsableWhirlpool.parse(poolPubkey, poolAccountInfo);
+      if (!poolData) throw new Error("Failed to parse pool data.");
 
-      // --- Create RPC Client ---
-      const rpc = createSolanaRpc(connection.current.rpcEndpoint);
+      const { tokenMintA, tokenMintB, tickSpacing, sqrtPrice, tickCurrentIndex } = poolData;
 
-      // --- Prepare Pool Address ---
-      const poolAddress = form.poolAddress as Address;
-      const poolPublicKey = new PublicKey(form.poolAddress);
+      const [decimalsA, decimalsB] = await Promise.all([
+        getMintDecimals(connection.current, tokenMintA),
+        getMintDecimals(connection.current, tokenMintB)
+      ]);
 
-      // --- Fetch Pool Account Data and Extract Mints ---
-      console.log(`Fetching pool account info for ${poolPublicKey.toBase58()}`);
-      const poolAccountInfo = await connection.current.getAccountInfo(poolPublicKey);
-      if (!poolAccountInfo) {
-        throw new Error(`Pool account not found: ${poolPublicKey.toBase58()}`);
-      }
-      if (poolAccountInfo.data.length < 173 + 32) {
-        throw new Error("Pool account data is too short to contain mints.");
-      }
-      const mintAOffset = 93;
-      const mintBOffset = 173;
-      tokenMintA = new PublicKey(poolAccountInfo.data.subarray(mintAOffset, mintAOffset + 32));
-      tokenMintB = new PublicKey(poolAccountInfo.data.subarray(mintBOffset, mintBOffset + 32));
-      console.log(`Extracted Mints - A: ${tokenMintA.toBase58()}, B: ${tokenMintB.toBase58()}`);
-
-      // --- Prepare SDK Parameters ---
-      const param: { tokenA?: bigint; tokenB?: bigint } = {};
-      const amountA = parseFloat(form.tokenAAmount || '0');
-      const amountB = parseFloat(form.tokenBAmount || '0');
-
-      if (amountA > 0) {
-        if (!tokenMintA) throw new Error("Token Mint A not available (logic error).");
-        param.tokenA = await uiAmountToBigInt(connection.current, form.tokenAAmount, tokenMintA);
-      } else if (amountB > 0) {
-        if (!tokenMintB) throw new Error("Token Mint B not available (logic error).");
-        param.tokenB = await uiAmountToBigInt(connection.current, form.tokenBAmount, tokenMintB);
-      } else {
-        throw new Error("Validation Error: At least one token amount must be greater than zero.");
-      }
-
-      const lowerPrice = form.isFullRange ? 0 : parseFloat(form.lowerPrice);
-      const upperPrice = form.isFullRange ? 0 : parseFloat(form.upperPrice);
-      const slippageBps = form.slippageBps;
-
-      // --- Wallet for SDK (Funder) ---
-      if (!funderWallet.signTransaction || !funderWallet.publicKey) {
-        throw new Error("Connected wallet doesn't have publicKey or signTransaction method.");
-      }
-      const funderSigner = funderWallet as any; // Cast funder wallet
-
-      // --- Call the Newer SDK function ---
-      console.log(`Calling ${form.isFullRange ? 'openFullRangePositionInstructions' : 'openPositionInstructions'}`);
-      // ... (rest of the console logs)
-
-      let kitInstructions;
+      let tickLowerIndex: number, tickUpperIndex: number;
       if (form.isFullRange) {
-        // Casting param as any to bypass TS2345
-        const { instructions } = await openFullRangePositionInstructions(
-          rpc, poolAddress, param as any, slippageBps, funderSigner
-        );
-        kitInstructions = instructions;
+        tickLowerIndex = ORCA_ABS_MIN_TICK_INDEX;
+        tickUpperIndex = ORCA_ABS_MAX_TICK_INDEX;
+        tickLowerIndex = TickUtil.getInitializableTickIndex(tickLowerIndex, tickSpacing);
+        tickUpperIndex = TickUtil.getInitializableTickIndex(tickUpperIndex, tickSpacing);
       } else {
-        // Casting param as any to bypass TS2345
-        const { instructions } = await openPositionInstructions(
-          rpc, poolAddress, param as any, lowerPrice, upperPrice, slippageBps, funderSigner
-        );
-        kitInstructions = instructions;
+        const lowerPriceDecimal = uiAmountToDecimal(form.lowerPrice);
+        const upperPriceDecimal = uiAmountToDecimal(form.upperPrice);
+        const lowerSqrtPriceX64 = PriceMath.priceToSqrtPriceX64(lowerPriceDecimal, decimalsA, decimalsB);
+        const upperSqrtPriceX64 = PriceMath.priceToSqrtPriceX64(upperPriceDecimal, decimalsA, decimalsB);
+        tickLowerIndex = PriceMath.sqrtPriceX64ToTickIndex(lowerSqrtPriceX64);
+        tickUpperIndex = PriceMath.sqrtPriceX64ToTickIndex(upperSqrtPriceX64);
+        tickLowerIndex = TickUtil.getInitializableTickIndex(tickLowerIndex, tickSpacing);
+        tickUpperIndex = TickUtil.getInitializableTickIndex(tickUpperIndex, tickSpacing);
+        if (tickLowerIndex >= tickUpperIndex) throw new Error("Lower tick must be less than upper tick after snapping.");
+        if (tickLowerIndex < ORCA_ABS_MIN_TICK_INDEX || tickUpperIndex > ORCA_ABS_MAX_TICK_INDEX) throw new Error("Ticks out of bounds.");
       }
 
-      console.log(`Received ${kitInstructions.length} instructions from SDK.`);
+      const amountADecimal = uiAmountToDecimal(form.tokenAAmount); const amountBDecimal = uiAmountToDecimal(form.tokenBAmount);
+      // Call function and use the returned BN instance directly
+      const amountA_BN = decimalAmountToBN(amountADecimal, decimalsA);
+      const amountB_BN = decimalAmountToBN(amountBDecimal, decimalsB);
 
-      // --- Attempt to Convert/Cast Instructions (RISKY) ---
-      const web3JsInstructions = kitInstructions as unknown as Web3jsTransactionInstruction[];
-      console.warn("Attempting to cast @solana/transactions instructions to @solana/web3.js format. This might fail if structures differ significantly.");
 
-      // --- Serialize Instructions ---
-      const finalInstructions = [...prerequisiteInstructions, ...web3JsInstructions];
-      finalInstructions.forEach((ix, idx) => {
-        if (!ix || !ix.keys || !ix.programId) {
-          console.error("Instruction structure seems invalid after casting:", ix);
-          throw new Error(`Instruction at index ${idx} has invalid structure after casting.`);
-        }
-        console.log(`Serializing instruction ${idx + 1}/${finalInstructions.length}`);
-        additionalSerializedInstructions.push(serializeInstructionToBase64(ix));
-      });
+      // Use estimateMaxLiquidityFromTokenAmounts (4 args)
+      // Cast tokenAmounts as any to bypass TS2345
+      const tokenAmounts: TokenAmounts = { tokenA: amountA_BN, tokenB: amountB_BN };
+      const liquidityAmount = PoolUtil.estimateMaxLiquidityFromTokenAmounts(
+        sqrtPrice,
+        tickLowerIndex,
+        tickUpperIndex,
+        tokenAmounts as any // Cast here
+      );
+      if (liquidityAmount.isZero()) throw new Error("Calculated liquidity is zero.");
 
-      console.log('Instructions serialized successfully.');
+      const positionMintKeypair = Keypair.generate();
+      prerequisiteInstructionsSigners.push(positionMintKeypair);
+
+      const slippageTolerance = Percentage.fromFraction(form.slippageBps, 10000);
+
+      // Use workaround ATA functions
+      const [{ address: funderTokenAccountA, instruction: createFunderAtaA }, { address: funderTokenAccountB, instruction: createFunderAtaB }] = await Promise.all([
+        getOrCreateATAInstructionWorkaround(ctx.connection, tokenMintA, funder, funder, false),
+        getOrCreateATAInstructionWorkaround(ctx.connection, tokenMintB, funder, funder, false),
+      ]);
+      if (createFunderAtaA) prerequisiteInstructions.push(createFunderAtaA);
+      if (createFunderAtaB) prerequisiteInstructions.push(createFunderAtaB);
+
+      const positionMetadataPda = PDAUtil.getPositionMetadata(positionMintKeypair.publicKey);
+      const positionPda = PDAUtil.getPosition(ctx.program.programId, positionMintKeypair.publicKey);
+      const ownerPositionTokenAccount = await findAssociatedTokenAddress(owner, positionMintKeypair.publicKey, true);
+
+
+      // Build instruction manually using WhirlpoolIx.openPositionWithMetadataIx
+      const openPositionParams = {
+        // Accounts
+        funder: funder,
+        owner: owner,
+        positionPda: positionPda,
+        metadataPda: positionMetadataPda,
+        positionMintAddress: positionMintKeypair.publicKey,
+        positionTokenAccount: ownerPositionTokenAccount,
+        tokenOwnerAccountA: funderTokenAccountA,
+        tokenOwnerAccountB: funderTokenAccountB,
+        tokenVaultA: poolData.tokenVaultA,
+        tokenVaultB: poolData.tokenVaultB,
+        whirlpool: poolPubkey,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+        rent: SYSVAR_RENT_PUBKEY,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+        metadataProgram: METAPLEX_METADATA_PROGRAM_ID,
+        metadataUpdateAuthority: funder,
+        // Args
+        liquidityAmount: liquidityAmount,
+        tokenMaxA: amountA_BN,
+        tokenMaxB: amountB_BN,
+        tickLowerIndex: tickLowerIndex,
+        tickUpperIndex: tickUpperIndex,
+        positionBump: positionPda.bump,
+        metadataBump: positionMetadataPda.bump,
+      };
+
+      const openPositionIx = WhirlpoolIx.openPositionWithMetadataIx(ctx.program, openPositionParams);
+      mainInstructions.push(openPositionIx as unknown as TransactionInstruction);
+
+
+      // Combine prerequisite and main instructions
+      const allInstructions = [...prerequisiteInstructions, ...mainInstructions];
+      allInstructions.forEach((ix) => { additionalSerializedInstructions.push(serializeInstructionToBase64(ix)); });
 
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
-      console.error('Error creating Orca position instruction:', error);
-      if (errorMessage.includes("Pool account not found")) {
-        setFormErrors({ poolAddress: errorMessage });
-      } else if (errorMessage.includes("amount conversion") || errorMessage.includes("Mint account not found")) {
-        setFormErrors({ tokenAAmount: errorMessage, tokenBAmount: errorMessage });
-      } else if (errorMessage.includes("signTransaction")) {
-        setFormErrors({ _error: `Wallet signing function might be incompatible: ${errorMessage}` });
-      } else if (errorMessage.includes("serializeInstructionToBase64") || errorMessage.includes("invalid structure")) {
-        setFormErrors({ _error: `Failed to serialize instructions - format mismatch likely: ${errorMessage}` });
-      } else if (errorMessage.includes("IncreaseLiquidityQuoteParam")) {
-        setFormErrors({ _error: `SDK Type Error (Param): ${errorMessage}` }); // More specific error
-      }
-      else {
-        setFormErrors({ _error: `Failed to create instruction: ${errorMessage}` });
-      }
-      return { serializedInstruction: '', isValid: false, governance: form.governedAccount?.governance, prerequisiteInstructions: [], prerequisiteInstructionsSigners: [], additionalSerializedInstructions: [] };
+      const msg = error instanceof Error ? error.message : JSON.stringify(error);
+      setFormErrors({ _error: `Failed to create instruction: ${msg}` });
+      return { serializedInstruction: '', isValid: false, governance: form.governedAccount?.governance, prerequisiteInstructions: [], prerequisiteInstructionsSigners, additionalSerializedInstructions: [] };
     }
 
-    // --- Return UiInstruction ---
     return {
-      serializedInstruction: '', // Keep empty as per pattern
-      isValid: true,
-      governance: form.governedAccount?.governance,
-      prerequisiteInstructions: [],
-      prerequisiteInstructionsSigners,
-      additionalSerializedInstructions,
-      chunkBy: 2, // Adjust chunk size as needed
+      serializedInstruction: '', isValid: true, governance: form.governedAccount?.governance,
+      prerequisiteInstructions: [], // Included in main list now
+      prerequisiteInstructionsSigners, // Pass position mint signer
+      additionalSerializedInstructions, // Serialized list of all instructions
+      chunkBy: 2,
     };
   }
 
-  // --- Form Inputs Definition ---
-  // (Inputs remain the same)
   const inputs: InstructionInput[] = [
-    {
-      label: 'Position Owner (Governance Account)',
-      initialValue: form.governedAccount,
-      name: 'governedAccount',
-      type: InstructionInputType.GOVERNED_ACCOUNT,
-      shouldBeGoverned,
-      governance,
-      options: assetAccounts.filter(acc => !!acc.extensions.transferAddress),
-    },
-    {
-      label: 'Whirlpool Address',
-      initialValue: form.poolAddress,
-      name: 'poolAddress',
-      type: InstructionInputType.INPUT,
-      inputType: 'text',
-    },
-    {
-      label: 'Full Range Position?',
-      initialValue: form.isFullRange,
-      name: 'isFullRange',
-      type: InstructionInputType.SWITCH,
-    },
-    ...(!form.isFullRange
-      ? [
-        {
-          label: 'Lower Price',
-          initialValue: form.lowerPrice,
-          name: 'lowerPrice',
-          type: InstructionInputType.INPUT,
-          inputType: 'text',
-        },
-        {
-          label: 'Upper Price',
-          initialValue: form.upperPrice,
-          name: 'upperPrice',
-          type: InstructionInputType.INPUT,
-          inputType: 'text',
-        },
-      ]
-      : []),
-    {
-      label: 'Token A Amount',
-      initialValue: form.tokenAAmount,
-      name: 'tokenAAmount',
-      type: InstructionInputType.INPUT,
-      inputType: 'text',
-    },
-    {
-      label: 'Token B Amount',
-      initialValue: form.tokenBAmount,
-      name: 'tokenBAmount',
-      type: InstructionInputType.INPUT,
-      inputType: 'text',
-    },
-    {
-      label: 'Acceptable Slippage (BPS)',
-      initialValue: form.slippageBps,
-      name: 'slippageBps',
-      type: InstructionInputType.INPUT,
-      inputType: 'number',
-      step: 1,
-    }
+    { label: 'Position Owner (Governance Account)', initialValue: form.governedAccount, name: 'governedAccount', type: InstructionInputType.GOVERNED_ACCOUNT, shouldBeGoverned, governance, options: assetAccounts.filter(acc => !!acc.extensions.transferAddress), },
+    { label: 'Whirlpool Address', initialValue: form.poolAddress, name: 'poolAddress', type: InstructionInputType.INPUT, inputType: 'text', },
+    { label: 'Full Range Position?', initialValue: form.isFullRange, name: 'isFullRange', type: InstructionInputType.SWITCH, },
+    ...(!form.isFullRange ? [
+      { label: 'Lower Price', initialValue: form.lowerPrice, name: 'lowerPrice', type: InstructionInputType.INPUT, inputType: 'text', },
+      { label: 'Upper Price', initialValue: form.upperPrice, name: 'upperPrice', type: InstructionInputType.INPUT, inputType: 'text', },
+    ] : []),
+    { label: 'Token A Amount', initialValue: form.tokenAAmount, name: 'tokenAAmount', type: InstructionInputType.INPUT, inputType: 'text', },
+    { label: 'Token B Amount', initialValue: form.tokenBAmount, name: 'tokenBAmount', type: InstructionInputType.INPUT, inputType: 'text', },
+    { label: 'Acceptable Slippage (BPS)', initialValue: form.slippageBps, name: 'slippageBps', type: InstructionInputType.INPUT, inputType: 'number', step: 1, }
   ];
 
-  // --- useEffect to Register Instruction ---
   useEffect(() => {
-    handleSetInstructions(
-      {
-        governedAccount: form.governedAccount?.governance,
-        getInstruction,
-      },
-      index
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    handleSetInstructions({ governedAccount: form.governedAccount?.governance, getInstruction, }, index);
   }, [form, governance, index, handleSetInstructions]);
 
-  // --- Render Component ---
-  return (
-    <InstructionForm
-      outerForm={form}
-      setForm={setForm}
-      inputs={inputs}
-      setFormErrors={setFormErrors}
-      formErrors={formErrors}
-    />
-  );
+  return ( <InstructionForm outerForm={form} setForm={setForm} inputs={inputs} setFormErrors={setFormErrors} formErrors={formErrors} /> );
 }

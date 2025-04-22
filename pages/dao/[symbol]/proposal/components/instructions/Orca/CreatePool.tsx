@@ -10,338 +10,208 @@ import { UiInstruction } from '@utils/uiTypes/proposalCreationTypes';
 import {
   PublicKey,
   Connection,
-  TransactionInstruction as Web3jsTransactionInstruction, // Alias for clarity
-  Keypair,
+  TransactionInstruction, // Import directly
+  Keypair, // Import Keypair
   Transaction,
-  ConfirmOptions,
   SystemProgram,
-  AccountInfo,
+  SYSVAR_RENT_PUBKEY // Import Rent Sysvar
 } from '@solana/web3.js';
 import { NewProposalContext } from '../../../new';
 import InstructionForm, { InstructionInput } from '../FormCreator';
 import { InstructionInputType } from '../inputInstructionType';
 import { AssetAccount } from '@utils/uiTypes/assets';
-import useWalletOnePointOh from '@hooks/useWalletOnePointOh'; // Your existing web3.js wallet hook
-import { useRealmQuery } from '@hooks/queries/realm';
+import useWalletOnePointOh from '@hooks/useWalletOnePointOh';
 import useGovernanceAssets from '@hooks/useGovernanceAssets';
-import useLegacyConnectionContext from '@hooks/useLegacyConnectionContext'; // Your existing web3.js connection hook
-
-// --- Import from NEWER Orca SDK ---
+import useLegacyConnectionContext from '@hooks/useLegacyConnectionContext';
+import { AnchorProvider } from '@coral-xyz/anchor';
 import {
-  createSplashPoolInstructions,
-  createConcentratedLiquidityPoolInstructions,
-  setWhirlpoolsConfig,
-  // Define tick spacing constants if not importing directly
-  // TICK_SPACING, // Might not be exported directly
-} from '@orca-so/whirlpools';
-
-// --- Import from @solana/kit for RPC and Address ---
-import { createSolanaRpc } from '@solana/kit'; // Use kit's RPC creator
-import { Address } from '@solana/addresses'; // Newer SDK uses Address type (branded string)
-
-// --- Import supporting types/libs ---
+  WhirlpoolContext,
+  buildWhirlpoolClient,
+  ORCA_WHIRLPOOL_PROGRAM_ID,
+  PriceMath,
+  PDAUtil,
+  WhirlpoolIx,
+  IGNORE_CACHE,
+  InitPoolParams, // Import InitPoolParams type for clarity
+} from '@orca-so/whirlpools-sdk';
 import { BN } from 'bn.js';
 import { Decimal } from 'decimal.js';
+import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
 
-// --- Define valid Orca Tick Spacings (based on legacy constants/docs) ---
-// Reference: https://dev.orca.so/legacy-whirlpools/overview/tick-spacing-and-fees
-const VALID_TICK_SPACINGS = [
-  1,   // 0.01%
-  8,   // 0.05%
-  64,  // 0.30% (Standard)
-  128, // 1.00%
-];
-const DEFAULT_TICK_SPACING = 64; // Standard
+// Define TICK_SPACING constants locally
+const TICK_SPACING_STABLE = 8;
+const TICK_SPACING_STANDARD = 64;
+const VALID_TICK_SPACINGS = [1, TICK_SPACING_STABLE, TICK_SPACING_STANDARD, 128];
+const DEFAULT_TICK_SPACING = TICK_SPACING_STANDARD;
 
-// --- Form State Interface ---
 interface CreatePoolForm {
-  // governedAccount is for proposal context, not the funder IX param
   governedAccount?: AssetAccount;
   tokenAMint: string;
   tokenBMint: string;
-  initialPrice: string; // Use string for Decimal precision in UI
-  tickSpacing: number; // Only used if useConcentratedPool is true
-  useConcentratedPool: boolean; // Selector between Splash/Concentrated
+  initialPrice: string;
+  tickSpacing: number;
 }
 
-// --- React Component ---
-export default function CreatePool({
-                                     index,
-                                     governance,
-                                   }: {
-  index: number;
-  governance: ProgramAccount<Governance> | null;
-}) {
-  // --- Hooks ---
-  const { handleSetInstructions } = useContext(NewProposalContext);
-  const connection = useLegacyConnectionContext(); // Your web3.js connection
-  const realm = useRealmQuery().data?.result;
-  const { assetAccounts } = useGovernanceAssets();
-  const wallet = useWalletOnePointOh(); // Your web3.js wallet adapter
+const uiAmountToDecimal = (amount: string): Decimal => {
+  try { return new Decimal(amount || '0'); } catch { return new Decimal(0); }
+};
 
-  // --- State ---
+// Helper to fetch mint decimals manually
+async function getMintDecimals(connection: Connection, mint: PublicKey): Promise<number> {
+  const mintInfo = await connection.getAccountInfo(mint);
+  if (!mintInfo) throw new Error(`Mint not found: ${mint.toBase58()}`);
+  if (mintInfo.data.length !== 82) throw new Error("Invalid mint account size");
+  return mintInfo.data.readUInt8(44); // Decimals are at offset 44
+}
+
+
+export default function CreatePool({ index, governance }: { index: number; governance: ProgramAccount<Governance> | null; }) {
+  const { handleSetInstructions } = useContext(NewProposalContext);
+  const connection = useLegacyConnectionContext();
+  const { assetAccounts } = useGovernanceAssets();
+  const wallet = useWalletOnePointOh();
   const [form, setForm] = useState<CreatePoolForm>({
-    governedAccount: undefined,
-    tokenAMint: '',
-    tokenBMint: '',
-    initialPrice: '0.01', // Default initial price
-    tickSpacing: DEFAULT_TICK_SPACING,
-    useConcentratedPool: false, // Default to Splash Pool
+    tokenAMint: '', tokenBMint: '', initialPrice: '0.01', tickSpacing: DEFAULT_TICK_SPACING,
   });
   const [formErrors, setFormErrors] = useState({});
   const shouldBeGoverned = !!(index !== 0 && governance);
 
-  // --- Validation Schema ---
   const schema = yup.object().shape({
-    governedAccount: yup
-      .object()
-      .nullable()
-      .required('Governance account selection is required for proposal context'),
-    tokenAMint: yup
-      .string()
-      .required('Token A mint is required')
-      .test('is-pubkey', 'Invalid Token A Mint address', (value) => {
-        try { new PublicKey(value || ''); return true; } catch (e) { return false; }
-      }),
-    tokenBMint: yup
-      .string()
-      .required('Token B mint is required')
-      .test('is-pubkey', 'Invalid Token B Mint address', (value) => {
-        try { new PublicKey(value || ''); return true; } catch (e) { return false; }
-      })
-      .test('not-same-as-A', 'Token A and Token B mints cannot be the same', function(value) {
-        return this.parent.tokenAMint !== value;
-      }),
-    initialPrice: yup
-      .string()
-      .required('Initial price is required')
-      .test('is-positive', 'Initial price must be positive', (val) => {
-        try { return new Decimal(val || '0').isPositive(); } catch { return false; }
-      }),
-    useConcentratedPool: yup.boolean(),
-    tickSpacing: yup.number().when('useConcentratedPool', {
-      is: true,
-      then: schema => schema
-        .required('Tick Spacing is required for Concentrated pools')
-        .oneOf(VALID_TICK_SPACINGS, `Tick spacing must be one of: ${VALID_TICK_SPACINGS.join(', ')}`),
-      otherwise: schema => schema.notRequired(),
-    }),
+    governedAccount: yup.object().nullable().required('Governance account selection is required'),
+    tokenAMint: yup.string().required('Token A mint is required').test('is-pubkey', 'Invalid Token A Mint', (v) => { try { new PublicKey(v || ''); return true; } catch { return false; } }),
+    tokenBMint: yup.string().required('Token B mint is required').test('is-pubkey', 'Invalid Token B Mint', (v) => { try { new PublicKey(v || ''); return true; } catch { return false; } }).test('not-same-as-A', 'Mints cannot be the same', function(v) { return this.parent.tokenAMint !== v; }),
+    initialPrice: yup.string().required('Initial price is required').test('is-positive', 'Price must be positive', (v) => { try { return new Decimal(v || '0').isPositive(); } catch { return false; } }),
+    tickSpacing: yup.number().required('Tick Spacing required').oneOf(VALID_TICK_SPACINGS, `Tick spacing must be one of: ${VALID_TICK_SPACINGS.join(', ')}`),
   });
 
-  // --- getInstruction Implementation ---
   async function getInstruction(): Promise<UiInstruction> {
     setFormErrors({});
     const isValid = await validateInstruction({ schema, form, setFormErrors });
-    const prerequisiteInstructions: Web3jsTransactionInstruction[] = [];
-    const prerequisiteInstructionsSigners: Keypair[] = [];
+    const prerequisiteInstructions: TransactionInstruction[] = [];
+    const prerequisiteInstructionsSigners: Keypair[] = []; // Signers for prerequisite IXs (vaults)
+    const mainInstructions: TransactionInstruction[] = []; // Use web3.js type
     const additionalSerializedInstructions: string[] = [];
 
-    if (
-      !isValid ||
-      !form.governedAccount?.governance?.account || // Check governed account for proposal context
-      !wallet?.publicKey || // Funder wallet
-      !connection.current
-    ) {
-      // Errors set by validateInstruction or basic checks below
-      if (!wallet?.connected) {
-        setFormErrors(prev => ({...prev, _error: 'Wallet not connected.' }));
-      }
-      return { serializedInstruction: '', isValid: false, governance: form.governedAccount?.governance, prerequisiteInstructions, prerequisiteInstructionsSigners, additionalSerializedInstructions: [] };
+    if (!isValid || !form.governedAccount?.governance?.account || !wallet?.publicKey || !connection.current) {
+      return { serializedInstruction: '', isValid: false, governance: form.governedAccount?.governance, prerequisiteInstructions, prerequisiteInstructionsSigners, additionalSerializedInstructions };
     }
 
     try {
-      // --- Funder ---
-      const funderWallet = wallet; // web3.js wallet adapter
+      const funder = wallet.publicKey;
+      if (!wallet.signTransaction) throw new Error("Wallet does not support signing.");
+      const provider = new AnchorProvider(connection.current, wallet as any, AnchorProvider.defaultOptions());
+      const ctx = WhirlpoolContext.withProvider(provider, ORCA_WHIRLPOOL_PROGRAM_ID);
 
-      // --- Set Whirlpools Config ---
-      await setWhirlpoolsConfig('solanaMainnet');
+      const tokenAMintPubKey = new PublicKey(form.tokenAMint);
+      const tokenBMintPubKey = new PublicKey(form.tokenBMint);
+      const tickSpacing = form.tickSpacing;
 
-      // --- Create RPC Client ---
-      const rpc = createSolanaRpc(connection.current.rpcEndpoint);
+      const [decimalsA, decimalsB] = await Promise.all([
+        getMintDecimals(connection.current, tokenAMintPubKey),
+        getMintDecimals(connection.current, tokenBMintPubKey)
+      ]);
 
-      // --- Prepare SDK Parameters ---
-      const tokenAMintAddress = form.tokenAMint as Address;
-      const tokenBMintAddress = form.tokenBMint as Address;
-      const initialPriceNumber = parseFloat(form.initialPrice); // SDK expects number
-      const tickSpacing = form.tickSpacing; // Already a number
+      const initialPriceDecimal = uiAmountToDecimal(form.initialPrice);
+      const initialSqrtPriceX64 = PriceMath.priceToSqrtPriceX64(initialPriceDecimal, decimalsA, decimalsB);
 
-      // --- Wallet for SDK (Funder) ---
-      if (!funderWallet.signTransaction || !funderWallet.publicKey) {
-        throw new Error("Connected wallet doesn't have publicKey or signTransaction method.");
-      }
-      const funderSigner = funderWallet as any; // Cast funder wallet
+      // Derive PDAs
+      const [whirlpoolsConfigKey] = await PublicKey.findProgramAddress(
+        [Buffer.from("whirlpools_config")], ctx.program.programId
+      );
+      const feeTierPdaInfo = PDAUtil.getFeeTier(ctx.program.programId, whirlpoolsConfigKey, tickSpacing);
+      const poolPdaInfo = PDAUtil.getWhirlpool(ctx.program.programId, whirlpoolsConfigKey, tokenAMintPubKey, tokenBMintPubKey, tickSpacing);
 
-      // --- Call the Newer SDK function based on pool type ---
-      console.log(`Calling ${form.useConcentratedPool ? 'createConcentratedLiquidityPoolInstructions' : 'createSplashPoolInstructions'}`);
-      console.log(`Mints: A=${tokenAMintAddress}, B=${tokenBMintAddress}`);
-      console.log(`Initial Price: ${initialPriceNumber}`);
-      if (form.useConcentratedPool) {
-        console.log(`Tick Spacing: ${tickSpacing}`);
-      }
-      console.log(`Funder (passing wallet directly): ${funderWallet?.publicKey?.toBase58()}`);
-
-      let kitInstructions; // Type: Instruction from @solana/transactions
-      let poolAddress: Address | undefined = undefined; // SDK returns the potential pool address
-
-      if (form.useConcentratedPool) {
-        const result = await createConcentratedLiquidityPoolInstructions(
-          rpc,
-          tokenAMintAddress,
-          tokenBMintAddress,
-          tickSpacing,
-          initialPriceNumber,
-          funderSigner // Pass funder wallet
-        );
-        kitInstructions = result.instructions;
-        poolAddress = result.poolAddress; // Capture pool address
-      } else {
-        const result = await createSplashPoolInstructions(
-          rpc,
-          tokenAMintAddress,
-          tokenBMintAddress,
-          initialPriceNumber,
-          funderSigner // Pass funder wallet
-        );
-        kitInstructions = result.instructions;
-        poolAddress = result.poolAddress; // Capture pool address
+      // Check if Fee Tier exists
+      let defaultFeeRate: number;
+      switch (tickSpacing) {
+        case 1: defaultFeeRate = 100; break;
+        case TICK_SPACING_STABLE: defaultFeeRate = 500; break;
+        case TICK_SPACING_STANDARD: defaultFeeRate = 3000; break;
+        case 128: defaultFeeRate = 10000; break;
+        default: throw new Error(`Unsupported tick spacing for default fee rate: ${tickSpacing}`);
       }
 
-      console.log(`Received ${kitInstructions.length} instructions from SDK.`);
-      console.log(`Predicted Pool Address: ${poolAddress ?? 'N/A'}`);
+      const feeTierAccount = await ctx.connection.getAccountInfo(feeTierPdaInfo.publicKey);
+      if (!feeTierAccount) {
+        console.log(`Initializing Fee Tier for tick spacing ${tickSpacing}`);
+        const initFeeTierIx = WhirlpoolIx.initializeFeeTierIx(ctx.program, {
+          whirlpoolsConfig: whirlpoolsConfigKey,
+          feeTierPda: feeTierPdaInfo,
+          funder: funder,
+          feeAuthority: funder,
+          tickSpacing: tickSpacing,
+          defaultFeeRate: defaultFeeRate,
+        });
+        mainInstructions.push(initFeeTierIx as unknown as TransactionInstruction);
+      }
+
+      // Generate Keypairs for the Token Vaults
+      const tokenVaultAKeypair = Keypair.generate();
+      const tokenVaultBKeypair = Keypair.generate();
+      // Add vault keypairs as signers for the transaction that creates them
+      prerequisiteInstructionsSigners.push(tokenVaultAKeypair);
+      prerequisiteInstructionsSigners.push(tokenVaultBKeypair);
 
 
-      // --- Attempt to Convert/Cast Instructions (RISKY) ---
-      const web3JsInstructions = kitInstructions as unknown as Web3jsTransactionInstruction[];
-      console.warn("Attempting to cast @solana/transactions instructions to @solana/web3.js format. This might fail if structures differ significantly.");
+      // Prepare parameters for initializePoolIx according to InitPoolParams type
+      const initPoolParams: InitPoolParams = {
+        whirlpoolsConfig: whirlpoolsConfigKey,
+        tokenMintA: tokenAMintPubKey,
+        tokenMintB: tokenBMintPubKey,
+        whirlpoolPda: poolPdaInfo,
+        initSqrtPrice: initialSqrtPriceX64, // Corrected name from SDK type
+        funder: funder,
+        feeTierKey: feeTierPdaInfo.publicKey,
+        tokenVaultAKeypair: tokenVaultAKeypair, // Pass generated keypair
+        tokenVaultBKeypair: tokenVaultBKeypair, // Pass generated keypair
+        tickSpacing: tickSpacing, // Add tickSpacing as it's part of the type
+      };
 
-      // --- Serialize Instructions ---
-      const finalInstructions = [...prerequisiteInstructions, ...web3JsInstructions];
-      finalInstructions.forEach((ix, idx) => {
-        if (!ix || !ix.keys || !ix.programId) {
-          console.error("Instruction structure seems invalid after casting:", ix);
-          throw new Error(`Instruction at index ${idx} has invalid structure after casting.`);
-        }
-        console.log(`Serializing instruction ${idx + 1}/${finalInstructions.length}`);
+      // Initialize Pool instruction
+      console.log(`Initializing Pool ${poolPdaInfo.publicKey.toBase58()}`);
+      const initPoolIx = WhirlpoolIx.initializePoolIx(ctx.program, initPoolParams);
+      mainInstructions.push(initPoolIx as unknown as TransactionInstruction);
+
+
+      // Serialize all main instructions
+      mainInstructions.forEach((ix) => {
         additionalSerializedInstructions.push(serializeInstructionToBase64(ix));
       });
 
-      console.log('Instructions serialized successfully.');
-
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
-      console.error('Error creating Orca pool instruction:', error);
-      if (errorMessage.includes("signTransaction")) {
-        setFormErrors({ _error: `Wallet signing function might be incompatible: ${errorMessage}` });
-      } else if (errorMessage.includes("serializeInstructionToBase64") || errorMessage.includes("invalid structure")) {
-        setFormErrors({ _error: `Failed to serialize instructions - format mismatch likely: ${errorMessage}` });
-      } else {
-        setFormErrors({ _error: `Failed to create instruction: ${errorMessage}` });
-      }
-      return { serializedInstruction: '', isValid: false, governance: form.governedAccount?.governance, prerequisiteInstructions: [], prerequisiteInstructionsSigners: [], additionalSerializedInstructions: [] };
+      const msg = error instanceof Error ? error.message : JSON.stringify(error);
+      setFormErrors({ _error: `Failed to create instruction: ${msg}` });
+      return { serializedInstruction: '', isValid: false, governance: form.governedAccount?.governance, prerequisiteInstructions, prerequisiteInstructionsSigners, additionalSerializedInstructions: [] };
     }
 
-    // --- Return UiInstruction ---
     return {
-      serializedInstruction: '', // Keep empty as per pattern
+      serializedInstruction: '', // Keep empty
       isValid: true,
       governance: form.governedAccount?.governance,
-      prerequisiteInstructions: [],
-      prerequisiteInstructionsSigners,
-      additionalSerializedInstructions,
-      chunkBy: 2, // Adjust chunk size as needed (pool creation is often 2-3 instructions)
+      prerequisiteInstructions, // Keep empty as vault creation is part of main IX
+      prerequisiteInstructionsSigners, // Pass vault signers
+      additionalSerializedInstructions, // Pass serialized main instructions
+      chunkBy: 2,
     };
   }
 
-  // Helper to map tick spacing to fee tier for display
   function getFeeTierFromTickSpacing(tickSpacing: number): string {
     switch (tickSpacing) {
-      case 1: return "0.01";
-      case 8: return "0.05";
-      case 64: return "0.30";
-      case 128: return "1.00";
-      default: return "Unknown";
+      case 1: return "0.01"; case TICK_SPACING_STABLE: return "0.05"; case TICK_SPACING_STANDARD: return "0.30"; case 128: return "1.00"; default: return "Unknown";
     }
   }
 
-  // --- Form Inputs Definition ---
   const inputs: InstructionInput[] = [
-    {
-      label: 'Governance Account (For Proposal)',
-      // tooltip: 'Select the governance account context for this proposal item.', // Add back if type allows
-      initialValue: form.governedAccount,
-      name: 'governedAccount',
-      type: InstructionInputType.GOVERNED_ACCOUNT,
-      shouldBeGoverned,
-      governance,
-      options: assetAccounts, // Use all asset accounts for context? Or filter?
-    },
-    {
-      label: 'Token A Mint',
-      // tooltip: 'The mint address of the first token in the pair (e.g., USDC).', // Add back if type allows
-      initialValue: form.tokenAMint,
-      name: 'tokenAMint',
-      type: InstructionInputType.INPUT,
-      inputType: 'text',
-    },
-    {
-      label: 'Token B Mint',
-      // tooltip: 'The mint address of the second token in the pair (e.g., ORCA).', // Add back if type allows
-      initialValue: form.tokenBMint,
-      name: 'tokenBMint',
-      type: InstructionInputType.INPUT,
-      inputType: 'text',
-    },
-    {
-      label: 'Initial Price',
-      // tooltip: 'The starting price of Token A denominated in Token B.', // Add back if type allows
-      initialValue: form.initialPrice,
-      name: 'initialPrice',
-      type: InstructionInputType.INPUT,
-      inputType: 'text', // Use text for Decimal precision
-    },
-    {
-      label: 'Use Concentrated Pool?',
-      // tooltip: 'Check this to create a Concentrated Liquidity pool (requires Tick Spacing). If unchecked, a simpler Splash pool is created.', // Add back if type allows
-      initialValue: form.useConcentratedPool,
-      name: 'useConcentratedPool',
-      type: InstructionInputType.SWITCH,
-    },
-    // Conditionally show Tick Spacing only for Concentrated pools
-    ...(form.useConcentratedPool
-      ? [
-        {
-          label: 'Tick Spacing',
-          // tooltip: `Determines the fee tier and price granularity. Lower values for stable pairs, higher for volatile pairs.`, // Add back if type allows
-          initialValue: form.tickSpacing,
-          name: 'tickSpacing',
-          type: InstructionInputType.SELECT, // Use SELECT for predefined options
-          options: VALID_TICK_SPACINGS.map(ts => ({ name: `${ts} (Fee: ${getFeeTierFromTickSpacing(ts)}%)`, value: ts })),
-        },
-      ]
-      : []),
+    { label: 'Governance Account (For Proposal)', initialValue: form.governedAccount, name: 'governedAccount', type: InstructionInputType.GOVERNED_ACCOUNT, shouldBeGoverned, governance, options: assetAccounts, },
+    { label: 'Token A Mint', initialValue: form.tokenAMint, name: 'tokenAMint', type: InstructionInputType.INPUT, inputType: 'text', },
+    { label: 'Token B Mint', initialValue: form.tokenBMint, name: 'tokenBMint', type: InstructionInputType.INPUT, inputType: 'text', },
+    { label: 'Initial Price (Token A in terms of Token B)', initialValue: form.initialPrice, name: 'initialPrice', type: InstructionInputType.INPUT, inputType: 'text', },
+    { label: 'Tick Spacing (Fee Tier)', initialValue: form.tickSpacing, name: 'tickSpacing', type: InstructionInputType.SELECT, options: VALID_TICK_SPACINGS.map(ts => ({ name: `${ts} (${getFeeTierFromTickSpacing(ts)}%)`, value: ts })), },
   ];
 
-
-  // --- useEffect to Register Instruction ---
   useEffect(() => {
-    handleSetInstructions(
-      {
-        governedAccount: form.governedAccount?.governance,
-        getInstruction,
-      },
-      index
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form, governance, index, handleSetInstructions]); // Include all dependencies
+    handleSetInstructions({ governedAccount: form.governedAccount?.governance, getInstruction, }, index);
+  }, [form, governance, index, handleSetInstructions]);
 
-  // --- Render Component ---
-  return (
-    <InstructionForm
-      outerForm={form}
-      setForm={setForm}
-      inputs={inputs}
-      setFormErrors={setFormErrors}
-      formErrors={formErrors}
-    />
-  );
+  return ( <InstructionForm outerForm={form} setForm={setForm} inputs={inputs} setFormErrors={setFormErrors} formErrors={formErrors} /> );
 }

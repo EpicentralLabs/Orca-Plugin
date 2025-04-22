@@ -861,10 +861,6 @@ export default function useGovernanceAssets() {
       packageId: PackageEnum.Orca,
     },
 
-    [Instructions.UpdatePoolFee]: {
-      name: 'Update Pool Fee',
-      packageId: PackageEnum.Orca,
-    },
 
     [Instructions.CreatePosition]: {
       name: 'Create Liquidity Position',

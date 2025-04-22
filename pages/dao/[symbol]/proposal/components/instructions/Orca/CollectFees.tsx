@@ -1,240 +1,234 @@
 import { useContext, useEffect, useState } from 'react';
 import * as yup from 'yup';
-import {
-  ProgramAccount,
-  Governance,
-  serializeInstructionToBase64,
-} from '@solana/spl-governance';
+import { ProgramAccount, Governance, serializeInstructionToBase64 } from '@solana/spl-governance';
 import { validateInstruction } from '@utils/instructionTools';
 import { UiInstruction } from '@utils/uiTypes/proposalCreationTypes';
 import {
   PublicKey,
   Connection,
-  TransactionInstruction as Web3jsTransactionInstruction, // Alias for clarity
+  TransactionInstruction,
   Keypair,
   Transaction,
-  ConfirmOptions,
   SystemProgram,
-  AccountInfo,
+  SYSVAR_RENT_PUBKEY
 } from '@solana/web3.js';
 import { NewProposalContext } from '../../../new';
 import InstructionForm, { InstructionInput } from '../FormCreator';
 import { InstructionInputType } from '../inputInstructionType';
 import { AssetAccount } from '@utils/uiTypes/assets';
-import useWalletOnePointOh from '@hooks/useWalletOnePointOh'; // Your existing web3.js wallet hook
-import { useRealmQuery } from '@hooks/queries/realm';
+import useWalletOnePointOh from '@hooks/useWalletOnePointOh';
 import useGovernanceAssets from '@hooks/useGovernanceAssets';
-import useLegacyConnectionContext from '@hooks/useLegacyConnectionContext'; // Your existing web3.js connection hook
-
-// --- Import from NEWER Orca SDK ---
+import useLegacyConnectionContext from '@hooks/useLegacyConnectionContext';
+import { AnchorProvider } from '@coral-xyz/anchor';
 import {
-  setWhirlpoolsConfig,
-  harvestPositionInstructions, // Collects fees AND rewards
-} from '@orca-so/whirlpools';
-
-// --- Import from @solana/kit for RPC and Address ---
-import { createSolanaRpc } from '@solana/kit'; // Use kit's RPC creator
-import { Address } from '@solana/addresses'; // Newer SDK uses Address type (branded string)
-
-// --- Import supporting types/libs ---
+  WhirlpoolContext,
+  buildWhirlpoolClient,
+  ORCA_WHIRLPOOL_PROGRAM_ID,
+  IGNORE_CACHE,
+  WhirlpoolClient,
+  ParsablePosition,
+  ParsableWhirlpool,
+  WhirlpoolIx,
+  PDAUtil,
+  PoolUtil,
+  TickUtil,
+  WhirlpoolData,
+  PositionData,
+  TokenAmounts,
+} from '@orca-so/whirlpools-sdk';
 import { BN } from 'bn.js';
 import { Decimal } from 'decimal.js';
+import { Percentage } from '@orca-so/common-sdk';
+import { TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } from '@solana/spl-token';
 
-// --- Form State Interface ---
+// --- Workaround Helper Functions ---
+
+async function findAssociatedTokenAddress(
+  walletAddress: PublicKey,
+  tokenMintAddress: PublicKey,
+  allowOwnerOffCurve = false
+): Promise<PublicKey> {
+  return (await PublicKey.findProgramAddress(
+    [
+      walletAddress.toBuffer(),
+      TOKEN_PROGRAM_ID.toBuffer(),
+      tokenMintAddress.toBuffer(),
+    ],
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  ))[0];
+}
+
+function createAtaInstruction(
+  payer: PublicKey,
+  associatedToken: PublicKey,
+  owner: PublicKey,
+  mint: PublicKey
+): TransactionInstruction {
+  const keys = [
+    { pubkey: payer, isSigner: true, isWritable: true },
+    { pubkey: associatedToken, isSigner: false, isWritable: true },
+    { pubkey: owner, isSigner: false, isWritable: false },
+    { pubkey: mint, isSigner: false, isWritable: false },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+  ];
+  return new TransactionInstruction({
+    keys,
+    programId: ASSOCIATED_TOKEN_PROGRAM_ID,
+    data: Buffer.from([]),
+  });
+}
+
+async function getOrCreateATAInstructionWorkaround(
+  connection: Connection,
+  mint: PublicKey,
+  owner: PublicKey,
+  funder: PublicKey,
+  allowOwnerOffCurve = true
+): Promise<{ address: PublicKey; instruction: TransactionInstruction | null }> {
+  const address = await findAssociatedTokenAddress(owner, mint, allowOwnerOffCurve);
+  const accountInfo = await connection.getAccountInfo(address);
+  let instruction: TransactionInstruction | null = null;
+  if (!accountInfo) {
+    instruction = createAtaInstruction(funder, address, owner, mint);
+  }
+  return { address, instruction };
+}
+// --- End Workaround Helper Functions ---
+
+
 interface CollectFeesForm {
-  governedAccount?: AssetAccount; // Represents the authority over the position NFT
+  governedAccount?: AssetAccount; // Authority over the position NFT
   positionMint: string;
 }
 
-// --- React Component ---
-// Note: Renamed slightly for clarity as it collects rewards too
-export default function CollectFeesAndRewards({
-                                                index,
-                                                governance,
-                                              }: {
-  index: number;
-  governance: ProgramAccount<Governance> | null;
-}) {
-  // --- Hooks ---
+// Renamed component slightly for clarity as it collects rewards too
+export default function CollectFeesAndRewards({ index, governance }: { index: number; governance: ProgramAccount<Governance> | null; }) {
   const { handleSetInstructions } = useContext(NewProposalContext);
-  const connection = useLegacyConnectionContext(); // Your web3.js connection
-  const realm = useRealmQuery().data?.result;
+  const connection = useLegacyConnectionContext();
   const { assetAccounts } = useGovernanceAssets();
-  const wallet = useWalletOnePointOh(); // Your web3.js wallet adapter
-
-  // --- State ---
-  const [form, setForm] = useState<CollectFeesForm>({
-    governedAccount: undefined,
-    positionMint: '',
-  });
+  const wallet = useWalletOnePointOh();
+  const [form, setForm] = useState<CollectFeesForm>({ positionMint: '' });
   const [formErrors, setFormErrors] = useState({});
   const shouldBeGoverned = !!(index !== 0 && governance);
 
-  // --- Validation Schema ---
   const schema = yup.object().shape({
-    governedAccount: yup
-      .object()
-      .nullable()
-      .required('Governance account (Position Authority) is required'),
-    positionMint: yup
-      .string()
-      .required('Position NFT Mint address is required')
-      .test('is-pubkey', 'Invalid Position Mint address', (value) => {
-        try { new PublicKey(value || ''); return true; } catch (e) { return false; }
-      }),
+    governedAccount: yup.object().nullable().required('Governance account (Position Authority) required'),
+    positionMint: yup.string().required('Position NFT Mint required').test('is-pubkey', 'Invalid Position Mint', (v) => { try { new PublicKey(v || ''); return true; } catch { return false; } }),
   });
 
-  // --- getInstruction Implementation ---
   async function getInstruction(): Promise<UiInstruction> {
     setFormErrors({});
     const isValid = await validateInstruction({ schema, form, setFormErrors });
-    const prerequisiteInstructions: Web3jsTransactionInstruction[] = [];
+    const prerequisiteInstructions: TransactionInstruction[] = [];
     const prerequisiteInstructionsSigners: Keypair[] = [];
+    const mainInstructions: TransactionInstruction[] = [];
     const additionalSerializedInstructions: string[] = [];
 
-    if (
-      !isValid ||
-      !form.governedAccount?.governance?.account ||
-      !form.governedAccount?.extensions.transferAddress || // Authority address
-      !wallet?.publicKey || // Funder wallet
-      !connection.current
-    ) {
-      if (!form.governedAccount?.extensions.transferAddress && form.governedAccount) {
-        setFormErrors(prev => ({...prev, governedAccount: 'Selected governed account does not have a valid authority address.' }));
-      }
-      if (!wallet?.connected) {
-        setFormErrors(prev => ({...prev, _error: 'Wallet not connected.' }));
-      }
-      return { serializedInstruction: '', isValid: false, governance: form.governedAccount?.governance, prerequisiteInstructions, prerequisiteInstructionsSigners, additionalSerializedInstructions: [] };
+    if (!isValid || !form.governedAccount?.governance?.account || !form.governedAccount?.extensions.transferAddress || !wallet?.publicKey || !connection.current) {
+      return { serializedInstruction: '', isValid: false, governance: form.governedAccount?.governance, prerequisiteInstructions, prerequisiteInstructionsSigners, additionalSerializedInstructions };
     }
 
     try {
-      // --- Authority & Funder ---
-      // Authority is derived from the governed account, its signature is handled by SPL Gov.
       const positionAuthority = form.governedAccount.extensions.transferAddress;
-      // Funder is the connected wallet, passed to the SDK.
-      const funderWallet = wallet;
+      const funder = wallet.publicKey; // Funder pays tx fees
+      if (!wallet.signTransaction) throw new Error("Wallet does not support signing.");
+      const provider = new AnchorProvider(connection.current, wallet as any, AnchorProvider.defaultOptions());
+      const ctx = WhirlpoolContext.withProvider(provider, ORCA_WHIRLPOOL_PROGRAM_ID);
+      const client = buildWhirlpoolClient(ctx);
 
-      // --- Set Whirlpools Config ---
-      await setWhirlpoolsConfig('solanaMainnet');
+      const positionMintPubKey = new PublicKey(form.positionMint);
+      const positionPda = PDAUtil.getPosition(ctx.program.programId, positionMintPubKey);
 
-      // --- Create RPC Client ---
-      const rpc = createSolanaRpc(connection.current.rpcEndpoint);
+      const positionAccountInfo = await ctx.connection.getAccountInfo(positionPda.publicKey, "confirmed");
+      if (!positionAccountInfo) throw new Error(`Position account (PDA) not found for mint: ${positionMintPubKey.toBase58()}`);
+      const positionData = ParsablePosition.parse(positionPda.publicKey, positionAccountInfo);
+      if (!positionData) throw new Error("Failed to parse position data.");
+      // Authority check happens implicitly via required signer
 
-      // --- Prepare Position Mint ---
-      const positionMintAddress = form.positionMint as Address;
+      const poolAccountInfo = await ctx.connection.getAccountInfo(positionData.whirlpool, "confirmed");
+      if (!poolAccountInfo) throw new Error(`Pool account not found: ${positionData.whirlpool.toBase58()}`);
+      const poolData = ParsableWhirlpool.parse(positionData.whirlpool, poolAccountInfo);
+      if (!poolData) throw new Error("Failed to parse pool data.");
 
-      // --- Wallet for SDK (Funder) ---
-      if (!funderWallet.signTransaction || !funderWallet.publicKey) {
-        throw new Error("Connected wallet doesn't have publicKey or signTransaction method.");
+      // Derive the position token account address
+      const positionTokenAccount = await findAssociatedTokenAddress(positionAuthority, positionMintPubKey, true);
+
+      // Get/Create ATAs for Authority (where fees/rewards go)
+      const ataInstructions: TransactionInstruction[] = [];
+      const [{ address: authorityTokenAccountA, instruction: createAtaA }, { address: authorityTokenAccountB, instruction: createAtaB }] = await Promise.all([
+        getOrCreateATAInstructionWorkaround(ctx.connection, poolData.tokenMintA, positionAuthority, funder, true),
+        getOrCreateATAInstructionWorkaround(ctx.connection, poolData.tokenMintB, positionAuthority, funder, true),
+      ]);
+      if (createAtaA) ataInstructions.push(createAtaA); if (createAtaB) ataInstructions.push(createAtaB);
+
+      const rewardDestinations: PublicKey[] = [];
+      for (const rewardInfo of poolData.rewardInfos) {
+        if (PoolUtil.isRewardInitialized(rewardInfo)) {
+          const { address: rewardAta, instruction: createRewardAtaIx } = await getOrCreateATAInstructionWorkaround(ctx.connection, rewardInfo.mint, positionAuthority, funder, true);
+          if (createRewardAtaIx) ataInstructions.push(createRewardAtaIx);
+          rewardDestinations.push(rewardAta);
+        } else { rewardDestinations.push(positionAuthority); } // Placeholder
       }
-      const funderSigner = funderWallet as any; // Cast funder wallet
+      prerequisiteInstructions.push(...ataInstructions);
 
-      // --- Call the Newer SDK function ---
-      // The 'wallet' parameter here likely acts as the funder and potentially the receiver
-      // of funds if specific destination accounts aren't derived/provided internally.
-      // Crucially, the on-chain program checks the actual positionAuthority signature provided by SPL Gov.
-      console.log(`Calling harvestPositionInstructions for mint: ${positionMintAddress}`);
-      console.log(`Funder (passing wallet directly): ${funderWallet?.publicKey?.toBase58()}`);
-      console.log(`Position Authority (governed account): ${positionAuthority.toBase58()}`);
+      // Build Main Instructions
+      const tickArrayLowerPda = PDAUtil.getTickArray(ctx.program.programId, positionData.whirlpool, TickUtil.getStartTickIndex(positionData.tickLowerIndex, poolData.tickSpacing));
+      const tickArrayUpperPda = PDAUtil.getTickArray(ctx.program.programId, positionData.whirlpool, TickUtil.getStartTickIndex(positionData.tickUpperIndex, poolData.tickSpacing));
 
+      // 1. Update Fees & Rewards (Good practice before collecting)
+      const updateIx = WhirlpoolIx.updateFeesAndRewardsIx(ctx.program, {
+        whirlpool: positionData.whirlpool, position: positionPda.publicKey, tickArrayLower: tickArrayLowerPda.publicKey, tickArrayUpper: tickArrayUpperPda.publicKey,
+      });
+      mainInstructions.push(updateIx as unknown as TransactionInstruction);
 
-      const {
-        instructions: kitInstructions, // These are @solana/transactions instructions
-        // feesQuote, rewardsQuote // Optional return values for UI display
-      } = await harvestPositionInstructions(
-        rpc,
-        positionMintAddress,
-        funderSigner // Pass funder wallet (cast as any)
-        // Note: The docs example shows harvestPositionInstructions(rpc, positionMint, wallet)
-        // It implicitly uses the 'wallet' as the authority/receiver in that context.
-        // For DAO, we rely on SPL Gov for authority sig, funder pays fees.
-      );
+      // 2. Collect Fees
+      const collectFeesIx = WhirlpoolIx.collectFeesIx(ctx.program, {
+        whirlpool: positionData.whirlpool, positionAuthority: positionAuthority, position: positionPda.publicKey,
+        positionTokenAccount: positionTokenAccount, // Use derived address
+        tokenOwnerAccountA: authorityTokenAccountA, tokenOwnerAccountB: authorityTokenAccountB, tokenVaultA: poolData.tokenVaultA, tokenVaultB: poolData.tokenVaultB,
+      });
+      mainInstructions.push(collectFeesIx as unknown as TransactionInstruction);
 
-      console.log(`Received ${kitInstructions.length} instructions from SDK.`);
-
-      // --- Attempt to Convert/Cast Instructions (RISKY) ---
-      const web3JsInstructions = kitInstructions as unknown as Web3jsTransactionInstruction[];
-      console.warn("Attempting to cast @solana/transactions instructions to @solana/web3.js format. This might fail if structures differ significantly.");
-
-      // --- Serialize Instructions ---
-      const finalInstructions = [...prerequisiteInstructions, ...web3JsInstructions];
-      finalInstructions.forEach((ix, idx) => {
-        if (!ix || !ix.keys || !ix.programId) {
-          console.error("Instruction structure seems invalid after casting:", ix);
-          throw new Error(`Instruction at index ${idx} has invalid structure after casting.`);
+      // 3. Collect Rewards
+      poolData.rewardInfos.forEach((rewardInfo, index) => {
+        if (PoolUtil.isRewardInitialized(rewardInfo)) {
+          const collectRewardIx = WhirlpoolIx.collectRewardIx(ctx.program, {
+            whirlpool: positionData.whirlpool, positionAuthority: positionAuthority, position: positionPda.publicKey,
+            positionTokenAccount: positionTokenAccount, // Use derived address
+            rewardOwnerAccount: rewardDestinations[index], rewardVault: rewardInfo.vault, rewardIndex: index,
+          });
+          mainInstructions.push(collectRewardIx as unknown as TransactionInstruction);
         }
-        console.log(`Serializing instruction ${idx + 1}/${finalInstructions.length}`);
-        additionalSerializedInstructions.push(serializeInstructionToBase64(ix));
       });
 
-      console.log('Instructions serialized successfully.');
+      const allInstructions = [...prerequisiteInstructions, ...mainInstructions];
+      allInstructions.forEach((ix) => { additionalSerializedInstructions.push(serializeInstructionToBase64(ix)); });
 
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
-      console.error('Error creating Orca harvest instruction:', error);
-      if (errorMessage.includes("signTransaction")) {
-        setFormErrors({ _error: `Wallet signing function might be incompatible: ${errorMessage}` });
-      } else if (errorMessage.includes("serializeInstructionToBase64") || errorMessage.includes("invalid structure")) {
-        setFormErrors({ _error: `Failed to serialize instructions - format mismatch likely: ${errorMessage}` });
-      } else {
-        setFormErrors({ _error: `Failed to create instruction: ${errorMessage}` });
-      }
-      return { serializedInstruction: '', isValid: false, governance: form.governedAccount?.governance, prerequisiteInstructions: [], prerequisiteInstructionsSigners: [], additionalSerializedInstructions: [] };
+      const msg = error instanceof Error ? error.message : JSON.stringify(error);
+      setFormErrors({ _error: `Failed to create instruction: ${msg}` });
+      return { serializedInstruction: '', isValid: false, governance: form.governedAccount?.governance, prerequisiteInstructions: [], prerequisiteInstructionsSigners, additionalSerializedInstructions: [] };
     }
 
-    // --- Return UiInstruction ---
     return {
-      serializedInstruction: '', // Keep empty as per pattern
-      isValid: true,
-      governance: form.governedAccount?.governance,
-      prerequisiteInstructions: [],
-      prerequisiteInstructionsSigners,
-      additionalSerializedInstructions,
-      chunkBy: 2, // Harvesting might involve update + collect fees + collect rewards (multiple)
+      serializedInstruction: '', isValid: true, governance: form.governedAccount?.governance,
+      prerequisiteInstructions: [], // Included in main list now
+      prerequisiteInstructionsSigners, // Should be empty
+      additionalSerializedInstructions, // Serialized list of all instructions
+      chunkBy: 2, // Adjust as needed
     };
   }
 
-  // --- Form Inputs Definition ---
   const inputs: InstructionInput[] = [
-    {
-      label: 'Position Authority (Governance Account)',
-      // tooltip: 'The DAO account that owns the Position NFT whose fees/rewards will be collected.', // Add back if type allows
-      initialValue: form.governedAccount,
-      name: 'governedAccount',
-      type: InstructionInputType.GOVERNED_ACCOUNT,
-      shouldBeGoverned,
-      governance,
-      options: assetAccounts.filter(acc => !!acc.extensions.transferAddress),
-    },
-    {
-      label: 'Position NFT Mint Address',
-      // tooltip: 'The mint address of the Orca Position NFT.', // Add back if type allows
-      initialValue: form.positionMint,
-      name: 'positionMint',
-      type: InstructionInputType.INPUT,
-      inputType: 'text',
-    },
+    { label: 'Position Authority (Governance Account)', initialValue: form.governedAccount, name: 'governedAccount', type: InstructionInputType.GOVERNED_ACCOUNT, shouldBeGoverned, governance, options: assetAccounts.filter(acc => !!acc.extensions.transferAddress), },
+    { label: 'Position NFT Mint Address', initialValue: form.positionMint, name: 'positionMint', type: InstructionInputType.INPUT, inputType: 'text', },
   ];
 
-  // --- useEffect to Register Instruction ---
   useEffect(() => {
-    handleSetInstructions(
-      { governedAccount: form.governedAccount?.governance, getInstruction },
-      index
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form, governance, index, handleSetInstructions]); // Include all dependencies
+    handleSetInstructions({ governedAccount: form.governedAccount?.governance, getInstruction, }, index);
+  }, [form, governance, index, handleSetInstructions]);
 
-  // --- Render Component ---
-  return (
-    // Renamed component slightly
-    <InstructionForm
-      outerForm={form}
-      setForm={setForm}
-      inputs={inputs}
-      setFormErrors={setFormErrors}
-      formErrors={formErrors}
-    />
-  );
+  return ( <InstructionForm outerForm={form} setForm={setForm} inputs={inputs} setFormErrors={setFormErrors} formErrors={formErrors} /> );
 }
