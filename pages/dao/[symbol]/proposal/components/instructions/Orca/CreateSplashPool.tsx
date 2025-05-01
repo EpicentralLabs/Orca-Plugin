@@ -15,7 +15,7 @@ import Input from '@components/inputs/Input'
 import { WhirlpoolContext, ORCA_WHIRLPOOL_PROGRAM_ID } from "@orca-so/whirlpools-sdk"
 import { Decimal } from "decimal.js"
 import { AnchorProvider } from "@coral-xyz/anchor"
-import TokenMintInput from '@components/inputs/TokenMintInput'
+import { AssetAccount } from '@utils/uiTypes/assets'
 
 const CreateSplashPool = ({
   index,
@@ -26,17 +26,21 @@ const CreateSplashPool = ({
 }) => {
   const connection = useLegacyConnectionContext()
   const wallet = useWalletOnePointOh()
-  const { governancesArray } = useGovernanceAssets()
+  const { governancesArray, assetAccounts } = useGovernanceAssets()
   const { handleSetInstructions } = useContext(NewProposalContext)
   
   // State for form inputs
   const [governedAccount, setGovernedAccount] = useState<
     ProgramAccount<Governance> | undefined
   >(undefined)
-  const [tokenAddressA, setTokenAddressA] = useState<string>('So11111111111111111111111111111111111111112')
-  const [tokenAddressB, setTokenAddressB] = useState<string>('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v')
+  const [tokenAssetA, setTokenAssetA] = useState<AssetAccount | null>(null)
+  const [tokenAssetB, setTokenAssetB] = useState<AssetAccount | null>(null)
   const [initialPrice, setInitialPrice] = useState<string>('0.01')
   const [isValid, setIsValid] = useState(false)
+
+  // Get tokenAddressA and tokenAddressB from the selected assets
+  const tokenAddressA = tokenAssetA?.extensions?.mint?.publicKey?.toBase58() || ''
+  const tokenAddressB = tokenAssetB?.extensions?.mint?.publicKey?.toBase58() || ''
 
   // Initialize SplGovernance to interact with governance program
   const splGovernance = new SplGovernance(connection.current)
@@ -45,6 +49,11 @@ const CreateSplashPool = ({
   const nativeAddress = governedAccount?.pubkey ?
     splGovernance.pda.nativeTreasuryAccount({governanceAccount: governedAccount.pubkey}).publicKey :
     undefined
+
+  // Filter token accounts from governance assets
+  const tokenAccounts = assetAccounts.filter(
+    (asset) => asset.isToken && asset.extensions.mint
+  )
 
   // Validate form inputs
   useEffect(() => {
@@ -161,31 +170,77 @@ const CreateSplashPool = ({
       />
 
       <div className="mb-3">
-        <TokenMintInput
-          label="Token A"
-          onValidMintChange={(mintAddress) => {
-            if (mintAddress) {
-              setTokenAddressA(mintAddress);
+        <label className="block text-sm font-medium text-white/50 mb-1">
+          Token A (Select governance token asset)
+        </label>
+        <select
+          className="w-full p-2 bg-bkg-1 rounded-md border border-fgd-4 text-sm focus:outline-none focus:border-primary-light"
+          onChange={(e) => {
+            const selectedIndex = parseInt(e.target.value)
+            if (selectedIndex >= 0) {
+              const selectedAsset = tokenAccounts[selectedIndex]
+              setTokenAssetA(selectedAsset)
+            } else {
+              setTokenAssetA(null)
             }
           }}
-        />
-        <div className="mt-1 text-xs text-white/50">
-          Current: {tokenAddressA}
-        </div>
+          value={tokenAccounts.findIndex(
+            (x) => x.extensions.mint?.publicKey.toBase58() === tokenAddressA
+          )}
+        >
+          <option value={-1}>Select a token</option>
+          {tokenAccounts.map((asset, index) => {
+            const mintAddress = asset.extensions.mint?.publicKey.toBase58()
+            const shortMint = mintAddress ? `${mintAddress.slice(0, 8)}...` : ''
+            return (
+              <option key={asset.pubkey.toBase58()} value={index}>
+                {shortMint}
+              </option>
+            )
+          })}
+        </select>
+        {tokenAddressA && (
+          <div className="mt-1 text-xs text-white/50">
+            Mint: {tokenAddressA}
+          </div>
+        )}
       </div>
 
       <div className="mb-3">
-        <TokenMintInput
-          label="Token B"
-          onValidMintChange={(mintAddress) => {
-            if (mintAddress) {
-              setTokenAddressB(mintAddress);
+        <label className="block text-sm font-medium text-white/50 mb-1">
+          Token B (Select governance token asset)
+        </label>
+        <select
+          className="w-full p-2 bg-bkg-1 rounded-md border border-fgd-4 text-sm focus:outline-none focus:border-primary-light"
+          onChange={(e) => {
+            const selectedIndex = parseInt(e.target.value)
+            if (selectedIndex >= 0) {
+              const selectedAsset = tokenAccounts[selectedIndex]
+              setTokenAssetB(selectedAsset)
+            } else {
+              setTokenAssetB(null)
             }
           }}
-        />
-        <div className="mt-1 text-xs text-white/50">
-          Current: {tokenAddressB}
-        </div>
+          value={tokenAccounts.findIndex(
+            (x) => x.extensions.mint?.publicKey.toBase58() === tokenAddressB
+          )}
+        >
+          <option value={-1}>Select a token</option>
+          {tokenAccounts.map((asset, index) => {
+            const mintAddress = asset.extensions.mint?.publicKey.toBase58()
+            const shortMint = mintAddress ? `${mintAddress.slice(0, 8)}...` : ''
+            return (
+              <option key={asset.pubkey.toBase58()} value={index}>
+                {shortMint}
+              </option>
+            )
+          })}
+        </select>
+        {tokenAddressB && (
+          <div className="mt-1 text-xs text-white/50">
+            Mint: {tokenAddressB}
+          </div>
+        )}
       </div>
 
       <Input
