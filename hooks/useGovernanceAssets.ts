@@ -173,6 +173,10 @@ export default function useGovernanceAssets() {
       name: 'Mean Finance',
       image: '/img/meanfinance.png',
     },
+    [PackageEnum.Orca]: {
+      name: 'Orca Whirlpool',
+      image: '/img/orca.png',
+    },
     [PackageEnum.PsyFinance]: {
       name: 'PsyFinance',
       image: '/img/psyfinance.png',
@@ -835,6 +839,17 @@ export default function useGovernanceAssets() {
     [Instructions.CollectPoolFees]: {
       name: 'Collect Pool Fees (CPMM)',
       packageId: PackageEnum.Raydium,
+    },
+    /*
+      ██████  ██████   ██████  █████  
+     ██    ██ ██   ██ ██      ██   ██ 
+     ██    ██ ██████  ██      ███████ 
+     ██    ██ ██   ██ ██      ██   ██ 
+      ██████  ██   ██  ██████ ██   ██                         
+    */
+    [Instructions.CreateSplashPool]: {
+      name: 'Create Whirlpool Splash Pool',
+      packageId: PackageEnum.Orca,
     },
     /*
       ██    ██ ███████ ██████      ██████  ██      ██    ██  ██████  ██ ███    ██

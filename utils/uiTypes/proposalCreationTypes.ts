@@ -21,6 +21,7 @@ export enum PackageEnum {
   MangoMarketV4,
   MeanFinance,
   NftPlugin,
+  Orca,
   PsyFinance,
   Pyth,
   Serum,
@@ -423,7 +424,8 @@ export enum Instructions {
   SymmetryDeposit,
   SymmetryWithdraw,
   TokenWithdrawFees,
-  CollectPoolFees
+  CollectPoolFees,
+  CreateSplashPool
 }
 
 export interface ComponentInstructionData {
