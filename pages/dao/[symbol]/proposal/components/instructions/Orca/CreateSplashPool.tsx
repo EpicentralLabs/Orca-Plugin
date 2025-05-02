@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 import { useContext, useEffect, useState } from "react";
-import { Keypair, PublicKey, SystemProgram, SYSVAR_RENT_PUBKEY, TransactionInstruction } from "@solana/web3.js";
+import { PublicKey } from "@solana/web3.js";
 import * as yup from "yup";
 import { isFormValid } from "@utils/formValidation";
 import { UiInstruction } from "@utils/uiTypes/proposalCreationTypes";
@@ -13,12 +13,8 @@ import { AccountType, AssetAccount } from "@utils/uiTypes/assets";
 import InstructionForm, { InstructionInput } from "../FormCreator";
 import { InstructionInputType } from "../inputInstructionType";
 import useWalletOnePointOh from "@hooks/useWalletOnePointOh";
-import { BN } from "@coral-xyz/anchor";
-import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import useLegacyConnectionContext from "@hooks/useLegacyConnectionContext";
 import { ORCA_WHIRLPOOL_PROGRAM_ID } from "@orca-so/whirlpools-sdk";
-import { PDAUtil } from "@orca-so/whirlpools-sdk";
-import { PriceMath } from "@orca-so/whirlpools-sdk";
-import { PoolUtil } from "@orca-so/whirlpools-sdk";
 import Decimal from "decimal.js";
 
 interface CreateSplashPoolForm {
@@ -28,6 +24,9 @@ interface CreateSplashPoolForm {
   initialPrice: number;
 }
 
+// This is the Orca whirlpool config account on mainnet
+const ORCA_WHIRLPOOL_CONFIG = new PublicKey("FcrweFY1G9HJAHG5inkGB6pKg1HZ6x9UC2WioAfWrGkR"); 
+
 const CreateSplashPool = ({
   index,
   governance,
@@ -36,6 +35,7 @@ const CreateSplashPool = ({
   governance: ProgramAccount<Governance> | null;
 }) => {
   const wallet = useWalletOnePointOh();
+  const connection = useLegacyConnectionContext();
   const { assetAccounts } = useGovernanceAssets();
  
   // Filter accounts for SOL accounts that can pay for transactions
@@ -95,180 +95,121 @@ const CreateSplashPool = ({
   const getInstruction = async (): Promise<UiInstruction> => {
     const { isValid, validationErrors } = await isFormValid(schema, form);
     setFormErrors(validationErrors);
-    let serializedInstruction = "";
-    const prerequisiteInstructions: TransactionInstruction[] = [];
-    const prerequisiteInstructionsSigners: (Keypair | null)[] = [];
-    const additionalSerializedInstructions: string[] = [];
- 
+    
     if (
-      isValid &&
-      form.governedAccount?.governance?.account &&
-      form.tokenAMint &&
-      form.tokenBMint &&
-      wallet?.publicKey
+      !isValid ||
+      !form.governedAccount?.governance?.account ||
+      !form.tokenAMint ||
+      !form.tokenBMint ||
+      !wallet?.publicKey ||
+      !connection
     ) {
+      return {
+        serializedInstruction: '',
+        isValid: false,
+        governance: form.governedAccount?.governance,
+      };
+    }
+    
+    try {
+      // Get token mint pubkeys from the selected assets
+      const tokenMintA = getMintPubkeyFromAsset(form.tokenAMint);
+      const tokenMintB = getMintPubkeyFromAsset(form.tokenBMint);
+
+      // Get payer - this is the governed account (usually DAO treasury)
+      const funder = form.governedAccount.governance.pubkey;
+      
+      // Orca example shows using a WhirlpoolClient to create a splash pool
+      // However, for the sake of simplicity in this integration, we'll create 
+      // the instructions more directly to avoid TypeScript errors with the SDK
+
+      // Import orcaModule first to avoid TypeScript errors
+      const orcaModule = await import('@orca-so/whirlpools-sdk');
+      
+      // Using the pattern from other instructions like CollectPoolFees.tsx
+      // Create a fake wallet and context to use the Orca SDK's instruction builders
+      const fakeWallet = {
+        publicKey: funder, 
+        signTransaction: async (tx: any) => tx,
+        signAllTransactions: async (txs: any) => txs
+      };
+      
+      // Initialize an anchor provider
+      const { AnchorProvider } = await import('@coral-xyz/anchor');
+      const provider = new AnchorProvider(connection.current, fakeWallet, {});
+      
+      // Get the context
+      const { Program } = await import('@coral-xyz/anchor');
+      const { IDL } = await import('@orca-so/whirlpools-sdk/dist/artifacts/whirlpool');
+      const program = new Program(IDL, ORCA_WHIRLPOOL_PROGRAM_ID, provider);
+      const ctx = orcaModule.WhirlpoolContext.fromWorkspace(
+        provider,
+        program,
+        undefined,
+        undefined, 
+        {
+          accountResolverOptions: { allowPDAOwnerAddress: true, createWrappedSolAccountMethod: "keypair" }
+        }
+      );
+      
+      // Convert the price to decimal
+      const initialPrice = new Decimal(form.initialPrice.toString());
+      
       try {
-        // Get token mint pubkeys from the selected assets
-        const tokenMintA = getMintPubkeyFromAsset(form.tokenAMint);
-        const tokenMintB = getMintPubkeyFromAsset(form.tokenBMint);
-
-        // Get ordered token mints - ensure they're PublicKeys
-        let orderedMintA: PublicKey;
-        let orderedMintB: PublicKey;
-        if (tokenMintA.toBase58() < tokenMintB.toBase58()) {
-          orderedMintA = tokenMintA;
-          orderedMintB = tokenMintB;
-        } else {
-          orderedMintA = tokenMintB;
-          orderedMintB = tokenMintA;
-        }
-
-        // Get payer - this is the governed account (usually DAO treasury)
-        const funder = form.governedAccount.governance.pubkey;
+        // Call the createSplashPool function to get the transaction
+        const whirlpoolClient = orcaModule.buildWhirlpoolClient(ctx);
         
-        // Set up constants for Splash Pool
-        const whirlpoolsConfig = new PublicKey("FcrweFY1G9HJAHG5inkGB6pKg1HZ6x9UC2WioAfWrGkR"); // Orca's default whirlpool config
-        const tickSpacing = 8; // Default for Splash Pools is 8
-        
-        // Calculate PDAs and keypairs needed for the pool
-        const whirlpoolPda = PDAUtil.getWhirlpool(
-          ORCA_WHIRLPOOL_PROGRAM_ID,
-          whirlpoolsConfig,
-          orderedMintA,
-          orderedMintB,
-          tickSpacing
+        const { tx } = await whirlpoolClient.createSplashPool(
+          ORCA_WHIRLPOOL_CONFIG,
+          tokenMintA,
+          tokenMintB,
+          initialPrice,
+          funder
         );
         
-        // Get feeTier PDA
-        const feeTierPda = PDAUtil.getFeeTier(
-          ORCA_WHIRLPOOL_PROGRAM_ID,
-          whirlpoolsConfig,
-          tickSpacing
-        );
-
-        // Create keypairs for token vaults
-        const tokenVaultAKeypair = Keypair.generate();
-        const tokenVaultBKeypair = Keypair.generate();
+        // Extract and serialize the instructions
+        // We have to access the private instructions property differently
+        // Accessing tx["instructions"] to get around TypeScript private property restrictions
+        const rawInstructions = tx["instructions"];
         
-        // Convert price to sqrtPriceX64 format
-        // Get the actual token decimals from the mint accounts
-        const decimalsA = form.tokenAMint.extensions.mint?.account.decimals || 6;
-        const decimalsB = form.tokenBMint.extensions.mint?.account.decimals || 6;
-        const price = new Decimal(form.initialPrice.toString());
-        const sqrtPriceX64 = PriceMath.priceToSqrtPriceX64(price, decimalsA, decimalsB);
-
-        // Program will be the Orca Whirlpool program
-        const programId = ORCA_WHIRLPOOL_PROGRAM_ID;
-        
-        // Create the initialize pool instruction
-        // This resembles Orca's initializePoolIx but is manually constructed
-        // because we can't directly use their SDK objects due to TS/bundling issues
-        const whirlpoolBump = whirlpoolPda.bump;
-        
-        // Build simplified instruction data - this is a placeholder
-        // In a real implementation, we would use proper Anchor serialization
-        const instructionData = Buffer.alloc(1 + 1 + 1 + 16); // Discriminator + bump + tickSpacing + sqrtPriceX64
-        instructionData.writeUInt8(0, 0); // Instruction discriminator for initializePool
-        instructionData.writeUInt8(whirlpoolBump, 1); // WhirlpoolBump
-        instructionData.writeUInt8(tickSpacing, 2); // tickSpacing as u8
-        
-        // Write sqrtPriceX64 bytes - this is simplified and may not be exactly how Orca does it
-        // Create a Uint8Array to avoid type mismatch
-        const sqrtPriceArray = [...sqrtPriceX64.toArray('le', 16)].map(n => Number(n));
-        const sqrtPriceUint8Array = new Uint8Array(sqrtPriceArray);
-        
-        // Copy the sqrtPrice bytes into our instruction data buffer
-        for (let i = 0; i < sqrtPriceUint8Array.length; i++) {
-          instructionData.writeUInt8(sqrtPriceUint8Array[i], 3 + i);
+        if (!rawInstructions || !Array.isArray(rawInstructions) || rawInstructions.length === 0) {
+          throw new Error("Failed to generate instructions for pool creation");
         }
         
-        // PREREQUISITE: Create the token vault accounts
-        // These would normally be created as part of the process
-        // In a real implementation, you would include instructions to create token accounts
-        // Adding placeholder instructions for demonstration
-        
-        // Create vault A
-        const createVaultAIx = SystemProgram.createAccount({
-          fromPubkey: funder,
-          newAccountPubkey: tokenVaultAKeypair.publicKey,
-          lamports: 1_000_000, // Example amount
-          space: 165, // Token account size
-          programId: TOKEN_PROGRAM_ID,
-        });
-        
-        // Create vault B
-        const createVaultBIx = SystemProgram.createAccount({
-          fromPubkey: funder,
-          newAccountPubkey: tokenVaultBKeypair.publicKey,
-          lamports: 1_000_000, // Example amount
-          space: 165, // Token account size
-          programId: TOKEN_PROGRAM_ID,
-        });
-        
-        // Add these as prerequisite instructions with their signers
-        prerequisiteInstructions.push(createVaultAIx, createVaultBIx);
-        prerequisiteInstructionsSigners.push(tokenVaultAKeypair, tokenVaultBKeypair);
-        
-        // Build the main instruction with all required accounts
-        const ix = new TransactionInstruction({
-          programId,
-          keys: [
-            { pubkey: whirlpoolsConfig, isSigner: false, isWritable: false },
-            { pubkey: orderedMintA, isSigner: false, isWritable: false },
-            { pubkey: orderedMintB, isSigner: false, isWritable: false },
-            { pubkey: funder, isSigner: true, isWritable: true },
-            { pubkey: whirlpoolPda.publicKey, isSigner: false, isWritable: true },
-            { pubkey: tokenVaultAKeypair.publicKey, isSigner: false, isWritable: true },
-            { pubkey: tokenVaultBKeypair.publicKey, isSigner: false, isWritable: true },
-            { pubkey: feeTierPda.publicKey, isSigner: false, isWritable: false },
-            { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-            { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-            { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
-          ],
-          data: instructionData,
-        });
-
-        serializedInstruction = serializeInstructionToBase64(ix);
-        
-        // In a real implementation, you might need to add additional instructions
-        // to initialize the token vaults or perform other operations
-        // Adding a placeholder additional instruction for demonstration
-        const additionalIx = new TransactionInstruction({
-          programId: SystemProgram.programId,
-          keys: [
-            { pubkey: funder, isSigner: true, isWritable: true },
-            { pubkey: tokenVaultAKeypair.publicKey, isSigner: false, isWritable: true },
-          ],
-          data: Buffer.from([]), // Empty buffer for this example
-        });
-        
-        additionalSerializedInstructions.push(serializeInstructionToBase64(additionalIx));
+        // Serialize all instructions
+        const serializedInstruction = serializeInstructionToBase64(rawInstructions[0]);
+        const additionalSerializedInstructions = rawInstructions.slice(1).map(ix => 
+          serializeInstructionToBase64(ix)
+        );
         
         console.log("Creating Orca Splash Pool with details:", {
-          whirlpoolAddress: whirlpoolPda.publicKey.toString(),
-          tokenMintA: orderedMintA.toString(),
-          tokenMintB: orderedMintB.toString(),
-          vaultA: tokenVaultAKeypair.publicKey.toString(),
-          vaultB: tokenVaultBKeypair.publicKey.toString(),
-          initialPrice: form.initialPrice,
-          tickSpacing
+          tokenMintA: tokenMintA.toString(),
+          tokenBMint: tokenMintB.toString(),
+          initialPrice: form.initialPrice.toString(),
+          instructionCount: rawInstructions.length
         });
+            
+        return {
+          serializedInstruction,
+          isValid: true,
+          governance: form.governedAccount?.governance,
+          additionalSerializedInstructions: additionalSerializedInstructions.length > 0 ? additionalSerializedInstructions : undefined,
+          prerequisiteInstructions: [], // Add any setup instructions that need to run before main instruction
+          prerequisiteInstructionsSigners: [], // Add any signers needed for prerequisite instructions
+          chunkBy: 1, // Controls how instructions are grouped in transactions
+        };
       } catch (e) {
-        console.error("Error creating splash pool instruction:", e);
+        console.error("Error generating splash pool instructions:", e);
         throw e;
       }
+    } catch (e) {
+      console.error("Error creating splash pool instruction:", e);
+      return {
+        serializedInstruction: '',
+        isValid: false,
+        governance: form.governedAccount?.governance,
+      };
     }
- 
-    const obj: UiInstruction = {
-      serializedInstruction,
-      isValid,
-      governance: form.governedAccount?.governance,
-      prerequisiteInstructions: prerequisiteInstructions.length > 0 ? prerequisiteInstructions : undefined,
-      prerequisiteInstructionsSigners: prerequisiteInstructionsSigners.length > 0 ? prerequisiteInstructionsSigners : undefined,
-      additionalSerializedInstructions: additionalSerializedInstructions.length > 0 ? additionalSerializedInstructions : undefined,
-      chunkBy: 2, // Split instructions into transactions with max 2 instructions each
-    };
-    return obj;
   };
 
   // Helper function to extract the mint pubkey from an asset account
