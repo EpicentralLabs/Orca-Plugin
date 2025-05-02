@@ -1,4 +1,6 @@
+import { BN } from "@coral-xyz/anchor";
 import { Connection, PublicKey } from "@solana/web3.js";
+import BufferLayout from "buffer-layout";
 import { AccountMetaData } from "@solana/spl-governance";
 import React from "react";
 
@@ -14,8 +16,7 @@ const ORCA_WHIRLPOOL_CONFIG = new PublicKey(
 
 // This maps instruction types to their decoders and UI components
 const ORCA_WHIRLPOOL_INSTRUCTIONS = {
-  // For Splash Pool Creation 
-  // The actual instruction discriminator may differ - this is an example
+  // For Splash Pool Creation instruction (discriminator may differ)
   1: {
     name: "Orca: Create Splash Pool",
     accounts: [
@@ -35,42 +36,59 @@ const ORCA_WHIRLPOOL_INSTRUCTIONS = {
       { name: "Rent" },
     ],
     getDataUI: async (
-      connection: Connection,
+      connection: Connection, 
       data: Uint8Array,
       accounts: AccountMetaData[]
     ) => {
       try {
-        // In a real implementation, you would decode the instruction data here
-        // based on how Orca encodes its CreateSplashPool instruction
+        // Skip the instruction discriminator (first byte)
+        // Note: Actual Orca instructions might use different encoding
+        const initialPriceLayout = BufferLayout.struct([
+          BufferLayout.nu64("initialPriceLow"),
+          BufferLayout.nu64("initialPriceHigh")
+        ]);
         
-        // For example purposes, showing the account information
+        // Decode the data starting after instruction discriminator
+        const decoded = initialPriceLayout.decode(Buffer.from(data), 1) as {
+          initialPriceLow: number;
+          initialPriceHigh: number;
+        };
+        
+        // Convert the decoded values to a price
+        // Orca often uses square root price in X64 fixed point notation
+        const initialPriceLow = new BN(decoded.initialPriceLow.toString());
+        const initialPriceHigh = new BN(decoded.initialPriceHigh.toString());
+        const initialPrice = new BN(initialPriceLow)
+          .add(new BN(initialPriceHigh).shln(64))
+          .toString();
+        
+        // Get token mints from accounts
+        const tokenMintA = accounts[3]?.pubkey.toString() || "Unknown";
+        const tokenMintB = accounts[4]?.pubkey.toString() || "Unknown";
+        
         return (
-          <div className="flex flex-col gap-2">
+          <>
             <div>
-              <span className="font-bold">Token A:</span>{" "}
-              {accounts[3]?.pubkey.toString()}
+              <span className="font-bold">Token A Mint:</span> {tokenMintA}
             </div>
             <div>
-              <span className="font-bold">Token B:</span>{" "}
-              {accounts[4]?.pubkey.toString()}
+              <span className="font-bold">Token B Mint:</span> {tokenMintB}
             </div>
             <div>
-              <span className="font-bold">Whirlpool:</span>{" "}
-              {accounts[2]?.pubkey.toString()}
-            </div>
-            <div>
-              <span className="font-bold">Config:</span>{" "}
-              {accounts[0]?.pubkey.toString()}
+              <span className="font-bold">Initial Price:</span> {initialPrice}
             </div>
             <div className="text-sm italic mt-2">
               Creates a new Orca Splash Pool for the specified token pair
             </div>
-          </div>
+          </>
         );
       } catch (e) {
         console.error("Error decoding Orca instruction:", e);
         return (
-          <div>Failed to decode Orca Splash Pool creation instruction</div>
+          <>
+            <div>Failed to decode Orca Splash Pool creation instruction</div>
+            <div>Error: {String(e)}</div>
+          </>
         );
       }
     },
