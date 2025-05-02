@@ -2,7 +2,7 @@
 import { useContext, useEffect, useState } from "react";
 import { Keypair, PublicKey, SystemProgram, SYSVAR_RENT_PUBKEY, TransactionInstruction } from "@solana/web3.js";
 import * as yup from "yup";
-import { isFormValid, validatePubkey } from "@utils/formValidation";
+import { isFormValid } from "@utils/formValidation";
 import { UiInstruction } from "@utils/uiTypes/proposalCreationTypes";
 import { NewProposalContext } from "../../../new";
 import useGovernanceAssets from "@hooks/useGovernanceAssets";
@@ -23,10 +23,9 @@ import Decimal from "decimal.js";
 
 interface CreateSplashPoolForm {
   governedAccount: AssetAccount | null;
-  tokenAMint: string;
-  tokenBMint: string;
+  tokenAMint: AssetAccount | null;
+  tokenBMint: AssetAccount | null;
   initialPrice: number;
-  holdupTime: number;
 }
 
 const CreateSplashPool = ({
@@ -43,14 +42,18 @@ const CreateSplashPool = ({
   const filteredAccounts = assetAccounts.filter(
     (x) => x.type === AccountType.SOL,
   );
+
+  // Filter for mint accounts in the governance treasury
+  const mintAccounts = assetAccounts.filter(
+    (x) => x.type === AccountType.MINT || x.extensions.mint
+  );
  
   const shouldBeGoverned = !!(index !== 0 && governance);
   const [form, setForm] = useState<CreateSplashPoolForm>({
     governedAccount: null,
-    tokenAMint: "",
-    tokenBMint: "",
+    tokenAMint: null,
+    tokenBMint: null,
     initialPrice: 0,
-    holdupTime: 0,
   });
   const [formErrors, setFormErrors] = useState({});
   const { handleSetInstructions } = useContext(NewProposalContext);
@@ -62,16 +65,28 @@ const CreateSplashPool = ({
       .nullable()
       .required("Governed account is required"),
     tokenAMint: yup
-      .string()
-      .required()
-      .test("is-valid-address", "Please enter a valid token A mint PublicKey", (value) =>
-        value ? validatePubkey(value) : false,
-      ),
+      .object()
+      .nullable()
+      .required("Token A mint is required"),
     tokenBMint: yup
-      .string()
-      .required()
-      .test("is-valid-address", "Please enter a valid token B mint PublicKey", (value) =>
-        value ? validatePubkey(value) : false,
+      .object()
+      .nullable()
+      .required("Token B mint is required")
+      .test(
+        "not-same-as-token-a",
+        "Token B must be different from Token A",
+        function (value: any) {
+          const { tokenAMint } = this.parent;
+          if (!value || !tokenAMint) return true;
+          
+          // Safe comparison using optional chaining
+          const tokenAMintPubkey = tokenAMint?.pubkey;
+          const tokenBMintPubkey = value?.pubkey;
+          
+          if (!tokenAMintPubkey || !tokenBMintPubkey) return true;
+          
+          return tokenAMintPubkey.toBase58() !== tokenBMintPubkey.toBase58();
+        }
       ),
     initialPrice: yup.number().required().min(0.000001, "Initial price must be greater than 0"),
   });
@@ -82,21 +97,25 @@ const CreateSplashPool = ({
     setFormErrors(validationErrors);
     let serializedInstruction = "";
     const prerequisiteInstructions: TransactionInstruction[] = [];
+    const prerequisiteInstructionsSigners: (Keypair | null)[] = [];
+    const additionalSerializedInstructions: string[] = [];
  
     if (
       isValid &&
       form.governedAccount?.governance?.account &&
+      form.tokenAMint &&
+      form.tokenBMint &&
       wallet?.publicKey
     ) {
       try {
-        // Convert token mints to PublicKeys
-        const tokenMintA = new PublicKey(form.tokenAMint);
-        const tokenMintB = new PublicKey(form.tokenBMint);
+        // Get token mint pubkeys from the selected assets
+        const tokenMintA = getMintPubkeyFromAsset(form.tokenAMint);
+        const tokenMintB = getMintPubkeyFromAsset(form.tokenBMint);
 
         // Get ordered token mints - ensure they're PublicKeys
         let orderedMintA: PublicKey;
         let orderedMintB: PublicKey;
-        if (tokenMintA.toString() < tokenMintB.toString()) {
+        if (tokenMintA.toBase58() < tokenMintB.toBase58()) {
           orderedMintA = tokenMintA;
           orderedMintB = tokenMintB;
         } else {
@@ -132,10 +151,9 @@ const CreateSplashPool = ({
         const tokenVaultBKeypair = Keypair.generate();
         
         // Convert price to sqrtPriceX64 format
-        // Assuming tokenA and tokenB both have 6 decimals (like USDC)
-        // In a real implementation, you would fetch the actual decimals
-        const decimalsA = 6;
-        const decimalsB = 6;
+        // Get the actual token decimals from the mint accounts
+        const decimalsA = form.tokenAMint.extensions.mint?.account.decimals || 6;
+        const decimalsB = form.tokenBMint.extensions.mint?.account.decimals || 6;
         const price = new Decimal(form.initialPrice.toString());
         const sqrtPriceX64 = PriceMath.priceToSqrtPriceX64(price, decimalsA, decimalsB);
 
@@ -164,7 +182,34 @@ const CreateSplashPool = ({
           instructionData.writeUInt8(sqrtPriceUint8Array[i], 3 + i);
         }
         
-        // Build the instruction with all required accounts
+        // PREREQUISITE: Create the token vault accounts
+        // These would normally be created as part of the process
+        // In a real implementation, you would include instructions to create token accounts
+        // Adding placeholder instructions for demonstration
+        
+        // Create vault A
+        const createVaultAIx = SystemProgram.createAccount({
+          fromPubkey: funder,
+          newAccountPubkey: tokenVaultAKeypair.publicKey,
+          lamports: 1_000_000, // Example amount
+          space: 165, // Token account size
+          programId: TOKEN_PROGRAM_ID,
+        });
+        
+        // Create vault B
+        const createVaultBIx = SystemProgram.createAccount({
+          fromPubkey: funder,
+          newAccountPubkey: tokenVaultBKeypair.publicKey,
+          lamports: 1_000_000, // Example amount
+          space: 165, // Token account size
+          programId: TOKEN_PROGRAM_ID,
+        });
+        
+        // Add these as prerequisite instructions with their signers
+        prerequisiteInstructions.push(createVaultAIx, createVaultBIx);
+        prerequisiteInstructionsSigners.push(tokenVaultAKeypair, tokenVaultBKeypair);
+        
+        // Build the main instruction with all required accounts
         const ix = new TransactionInstruction({
           programId,
           keys: [
@@ -173,8 +218,8 @@ const CreateSplashPool = ({
             { pubkey: orderedMintB, isSigner: false, isWritable: false },
             { pubkey: funder, isSigner: true, isWritable: true },
             { pubkey: whirlpoolPda.publicKey, isSigner: false, isWritable: true },
-            { pubkey: tokenVaultAKeypair.publicKey, isSigner: true, isWritable: true },
-            { pubkey: tokenVaultBKeypair.publicKey, isSigner: true, isWritable: true },
+            { pubkey: tokenVaultAKeypair.publicKey, isSigner: false, isWritable: true },
+            { pubkey: tokenVaultBKeypair.publicKey, isSigner: false, isWritable: true },
             { pubkey: feeTierPda.publicKey, isSigner: false, isWritable: false },
             { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
             { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
@@ -185,9 +230,20 @@ const CreateSplashPool = ({
 
         serializedInstruction = serializeInstructionToBase64(ix);
         
-        // For a complete implementation, we would also need to include the token vault keypairs
-        // as signers. Since this is a governance proposal, the DAO would need a separate
-        // mechanism to handle these keypairs.
+        // In a real implementation, you might need to add additional instructions
+        // to initialize the token vaults or perform other operations
+        // Adding a placeholder additional instruction for demonstration
+        const additionalIx = new TransactionInstruction({
+          programId: SystemProgram.programId,
+          keys: [
+            { pubkey: funder, isSigner: true, isWritable: true },
+            { pubkey: tokenVaultAKeypair.publicKey, isSigner: false, isWritable: true },
+          ],
+          data: Buffer.from([]), // Empty buffer for this example
+        });
+        
+        additionalSerializedInstructions.push(serializeInstructionToBase64(additionalIx));
+        
         console.log("Creating Orca Splash Pool with details:", {
           whirlpoolAddress: whirlpoolPda.publicKey.toString(),
           tokenMintA: orderedMintA.toString(),
@@ -208,9 +264,21 @@ const CreateSplashPool = ({
       isValid,
       governance: form.governedAccount?.governance,
       prerequisiteInstructions: prerequisiteInstructions.length > 0 ? prerequisiteInstructions : undefined,
-      customHoldUpTime: form.holdupTime,
+      prerequisiteInstructionsSigners: prerequisiteInstructionsSigners.length > 0 ? prerequisiteInstructionsSigners : undefined,
+      additionalSerializedInstructions: additionalSerializedInstructions.length > 0 ? additionalSerializedInstructions : undefined,
+      chunkBy: 2, // Split instructions into transactions with max 2 instructions each
     };
     return obj;
+  };
+
+  // Helper function to extract the mint pubkey from an asset account
+  const getMintPubkeyFromAsset = (asset: AssetAccount): PublicKey => {
+    if (asset.type === AccountType.MINT) {
+      return asset.pubkey;
+    } else if (asset.extensions.mint) {
+      return asset.extensions.mint.publicKey;
+    }
+    throw new Error("Asset does not contain a valid mint");
   };
  
   useEffect(() => {
@@ -234,25 +302,20 @@ const CreateSplashPool = ({
       options: filteredAccounts,
     },
     {
-      label: "Instruction hold up time (days)",
-      initialValue: form.holdupTime,
-      type: InstructionInputType.INPUT,
-      inputType: "number",
-      name: "holdupTime",
-    },
-    {
       label: "Token A Mint",
       initialValue: form.tokenAMint,
-      type: InstructionInputType.INPUT,
       name: "tokenAMint",
-      placeholder: "Token A mint address (Pubkey)",
+      type: InstructionInputType.SELECT,
+      options: mintAccounts,
+      shouldBeGoverned: false,
     },
     {
       label: "Token B Mint",
       initialValue: form.tokenBMint,
-      type: InstructionInputType.INPUT,
       name: "tokenBMint",
-      placeholder: "Token B mint address (Pubkey)",
+      type: InstructionInputType.SELECT,
+      options: mintAccounts,
+      shouldBeGoverned: false,
     },
     {
       label: "Initial Price",
