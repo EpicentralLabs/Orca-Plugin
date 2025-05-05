@@ -156,6 +156,7 @@ import WithdrawFees from './components/instructions/Token2022/WithdrawFees'
 import SquadsV4RemoveMember from './components/instructions/Squads/SquadsV4RemoveMember'
 import CollectPoolFees from './components/instructions/Raydium/CollectPoolFees'
 import OrcaCreateSplashPool from './components/instructions/Orca/OrcaCreateSplashPool'
+import OrcaOpenPosition from './components/instructions/Orca/OrcaOpenPosition'
 // Removing the import for CreateSplashPool since the module cannot be found
 
 const TITLE_LENGTH_LIMIT = 130
@@ -636,7 +637,8 @@ const New = () => {
       [Instructions.SymmetryDeposit]: SymmetryDeposit,
       [Instructions.SymmetryWithdraw]: SymmetryWithdraw,
       [Instructions.CollectPoolFees]: CollectPoolFees,
-      [Instructions.OrcaCreateSplashPool]: OrcaCreateSplashPool
+      [Instructions.OrcaCreateSplashPool]: OrcaCreateSplashPool,
+      [Instructions.OrcaOpenPosition]: OrcaOpenPosition
     }),
     [governance?.pubkey?.toBase58()],
   )

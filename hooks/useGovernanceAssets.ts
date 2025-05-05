@@ -851,6 +851,10 @@ export default function useGovernanceAssets() {
       name: 'Create Whirlpool Splash Pool',
       packageId: PackageEnum.Orca,
     },
+    [Instructions.OrcaOpenPosition]: {
+      name: 'Open Whirlpool Position',
+      packageId: PackageEnum.Orca,
+    },
     /*
       ██    ██ ███████ ██████      ██████  ██      ██    ██  ██████  ██ ███    ██
       ██    ██ ██      ██   ██     ██   ██ ██      ██    ██ ██       ██ ████   ██
