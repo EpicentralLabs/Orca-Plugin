@@ -1,282 +1,227 @@
-/* eslint-disable @typescript-eslint/no-non-null-assertion */
-import { useContext, useEffect, useState } from "react";
-import { PublicKey } from "@solana/web3.js";
-import * as yup from "yup";
-import { isFormValid } from "@utils/formValidation";
-import { UiInstruction } from "@utils/uiTypes/proposalCreationTypes";
-import { NewProposalContext } from "../../../new";
-import useGovernanceAssets from "@hooks/useGovernanceAssets";
-import { Governance } from "@solana/spl-governance";
-import { ProgramAccount } from "@solana/spl-governance";
-import { serializeInstructionToBase64 } from "@solana/spl-governance";
-import { AccountType, AssetAccount } from "@utils/uiTypes/assets";
-import InstructionForm, { InstructionInput } from "../FormCreator";
-import { InstructionInputType } from "../inputInstructionType";
-import useWalletOnePointOh from "@hooks/useWalletOnePointOh";
-import useLegacyConnectionContext from "@hooks/useLegacyConnectionContext";
-import { ORCA_WHIRLPOOL_PROGRAM_ID } from "@orca-so/whirlpools-sdk";
-import Decimal from "decimal.js";
+import { useContext, useEffect, useState } from 'react'
+import * as yup from 'yup'
+import { Governance, ProgramAccount, serializeInstructionToBase64 } from '@solana/spl-governance'
+import { PublicKey } from '@solana/web3.js'
+import { validateInstruction } from '@utils/instructionTools'
+import { UiInstruction } from '@utils/uiTypes/proposalCreationTypes'
+import { NewProposalContext } from '../../../new'
+import GovernedAccountSelect from '../../GovernedAccountSelect'
+import useGovernanceAssets from '@hooks/useGovernanceAssets'
+import { useLegacyVoterWeight } from '@hooks/queries/governancePower'
+import TokenMintInput from '@components/inputs/TokenMintInput'
+import useLegacyConnectionContext from '@hooks/useLegacyConnectionContext'
+import useWalletOnePointOh from '@hooks/useWalletOnePointOh'
+import { isFormValid, validatePubkey } from '@utils/formValidation'
+import Input from '@components/inputs/Input'
+import { WhirlpoolContext, buildWhirlpoolClient } from '@orca-so/whirlpools-sdk'
+import Decimal from 'decimal.js'
 
-interface CreateSplashPoolForm {
-  governedAccount: AssetAccount | null;
-  tokenAMint: AssetAccount | null;
-  tokenBMint: AssetAccount | null;
-  initialPrice: number;
+// Form interface for the component
+interface OrcaCreateSplashPoolForm {
+  governedAccount?: any
+  tokenMintA?: string
+  tokenMintB?: string
+  initialPrice?: string
+  whirlpoolConfig?: string
 }
 
-// This is the Orca whirlpool config account on mainnet
-const ORCA_WHIRLPOOL_CONFIG = new PublicKey("FcrweFY1G9HJAHG5inkGB6pKg1HZ6x9UC2WioAfWrGkR"); 
-
-const CreateSplashPool = ({
+const OrcaCreateSplashPool = ({
   index,
   governance,
 }: {
-  index: number;
-  governance: ProgramAccount<Governance> | null;
+  index: number
+  governance: ProgramAccount<Governance> | null
 }) => {
-  const wallet = useWalletOnePointOh();
-  const connection = useLegacyConnectionContext();
-  const { assetAccounts } = useGovernanceAssets();
- 
-  // Filter accounts for SOL accounts that can pay for transactions
-  const filteredAccounts = assetAccounts.filter(
-    (x) => x.type === AccountType.SOL,
-  );
+  const connection = useLegacyConnectionContext()
+  const wallet = useWalletOnePointOh()
+  const { result: ownVoterWeight } = useLegacyVoterWeight()
+  const { assetAccounts } = useGovernanceAssets()
+  const shouldBeGoverned = !!(index !== 0 && governance)
+  
+  const [form, setForm] = useState<OrcaCreateSplashPoolForm>({})
+  const [formErrors, setFormErrors] = useState({})
+  const { handleSetInstructions } = useContext(NewProposalContext)
 
-  // Filter for mint accounts in the governance treasury
-  const mintAccounts = assetAccounts.filter(
-    (x) => x.type === AccountType.MINT || x.extensions.mint
-  );
- 
-  const shouldBeGoverned = !!(index !== 0 && governance);
-  const [form, setForm] = useState<CreateSplashPoolForm>({
-    governedAccount: null,
-    tokenAMint: null,
-    tokenBMint: null,
-    initialPrice: 0,
-  });
-  const [formErrors, setFormErrors] = useState({});
-  const { handleSetInstructions } = useContext(NewProposalContext);
- 
-  // Yup schema for validation
+  const handleSetForm = ({ propertyName, value }) => {
+    setFormErrors({})
+    setForm({ ...form, [propertyName]: value })
+  }
+
+  // Default Orca WhirlpoolsConfig on devnet
+  const DEFAULT_WHIRLPOOLS_CONFIG = new PublicKey('FcrweFY1G9HJAHG5inkGB6pKg1HZ6x9UC2WioAfWrGkR')
+  
+  // Orca Whirlpool Program ID
+  const ORCA_WHIRLPOOL_PROGRAM_ID = new PublicKey('whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc')
+
+  // Schema for form validation
   const schema = yup.object().shape({
     governedAccount: yup
       .object()
       .nullable()
-      .required("Governed account is required"),
-    tokenAMint: yup
-      .object()
-      .nullable()
-      .required("Token A mint is required"),
-    tokenBMint: yup
-      .object()
-      .nullable()
-      .required("Token B mint is required")
-      .test(
-        "not-same-as-token-a",
-        "Token B must be different from Token A",
-        function (value: any) {
-          const { tokenAMint } = this.parent;
-          if (!value || !tokenAMint) return true;
-          
-          // Safe comparison using optional chaining
-          const tokenAMintPubkey = tokenAMint?.pubkey;
-          const tokenBMintPubkey = value?.pubkey;
-          
-          if (!tokenAMintPubkey || !tokenBMintPubkey) return true;
-          
-          return tokenAMintPubkey.toBase58() !== tokenBMintPubkey.toBase58();
-        }
-      ),
-    initialPrice: yup.number().required().min(0.000001, "Initial price must be greater than 0"),
-  });
- 
-  // Build and serialize the instruction
-  const getInstruction = async (): Promise<UiInstruction> => {
-    const { isValid, validationErrors } = await isFormValid(schema, form);
-    setFormErrors(validationErrors);
+      .required('Governed account is required'),
+    tokenMintA: yup
+      .string()
+      .test(validatePubkey)
+      .required('Token Mint A is required'),
+    tokenMintB: yup
+      .string()
+      .test(validatePubkey)
+      .required('Token Mint B is required'),
+    initialPrice: yup
+      .string()
+      .required('Initial price is required'),
+    whirlpoolConfig: yup
+      .string()
+      .test(validatePubkey)
+      .notRequired()
+  })
+
+  async function getInstruction(): Promise<UiInstruction> {
+    const { isValid, validationErrors } = await isFormValid(schema, form)
+    setFormErrors(validationErrors)
     
-    if (
-      !isValid ||
-      !form.governedAccount?.governance?.account ||
-      !form.tokenAMint ||
-      !form.tokenBMint ||
-      !wallet?.publicKey ||
-      !connection
-    ) {
+    if (!connection || !isValid || !form.governedAccount?.governance?.account || !form.tokenMintA || !form.tokenMintB || !form.initialPrice || !wallet?.publicKey) {
       return {
         serializedInstruction: '',
         isValid: false,
         governance: form.governedAccount?.governance,
-      };
-    }
-    
-    try {
-      // Get token mint pubkeys from the selected assets
-      const tokenMintA = getMintPubkeyFromAsset(form.tokenAMint);
-      const tokenMintB = getMintPubkeyFromAsset(form.tokenBMint);
-
-      // Get payer - this is the governed account (usually DAO treasury)
-      const funder = form.governedAccount.governance.pubkey;
-      
-      // Orca example shows using a WhirlpoolClient to create a splash pool
-      // However, for the sake of simplicity in this integration, we'll create 
-      // the instructions more directly to avoid TypeScript errors with the SDK
-
-      // Import orcaModule first to avoid TypeScript errors
-      const orcaModule = await import('@orca-so/whirlpools-sdk');
-      
-      // Using the pattern from other instructions like CollectPoolFees.tsx
-      // Create a fake wallet and context to use the Orca SDK's instruction builders
-      const fakeWallet = {
-        publicKey: funder, 
-        signTransaction: async (tx: any) => tx,
-        signAllTransactions: async (txs: any) => txs
-      };
-      
-      // Initialize an anchor provider
-      const { AnchorProvider } = await import('@coral-xyz/anchor');
-      const provider = new AnchorProvider(connection.current, fakeWallet, {});
-      
-      // Get the context
-      const { Program } = await import('@coral-xyz/anchor');
-      const { IDL } = await import('@orca-so/whirlpools-sdk/dist/artifacts/whirlpool');
-      const program = new Program(IDL, ORCA_WHIRLPOOL_PROGRAM_ID, provider);
-      const ctx = orcaModule.WhirlpoolContext.fromWorkspace(
-        provider,
-        program,
-        undefined,
-        undefined, 
-        {
-          accountResolverOptions: { allowPDAOwnerAddress: true, createWrappedSolAccountMethod: "keypair" }
-        }
-      );
-      
-      // Convert the price to decimal
-      const initialPrice = new Decimal(form.initialPrice.toString());
-      
-      try {
-        // Call the createSplashPool function to get the transaction
-        const whirlpoolClient = orcaModule.buildWhirlpoolClient(ctx);
-        
-        const { tx } = await whirlpoolClient.createSplashPool(
-          ORCA_WHIRLPOOL_CONFIG,
-          tokenMintA,
-          tokenMintB,
-          initialPrice,
-          funder
-        );
-        
-        // Extract and serialize the instructions
-        // We have to access the private instructions property differently
-        // Accessing tx["instructions"] to get around TypeScript private property restrictions
-        const rawInstructions = tx["instructions"];
-        
-        if (!rawInstructions || !Array.isArray(rawInstructions) || rawInstructions.length === 0) {
-          throw new Error("Failed to generate instructions for pool creation");
-        }
-        
-        // Serialize all instructions
-        const serializedInstruction = serializeInstructionToBase64(rawInstructions[0]);
-        const additionalSerializedInstructions = rawInstructions.slice(1).map(ix => 
-          serializeInstructionToBase64(ix)
-        );
-        
-        console.log("Creating Orca Splash Pool with details:", {
-          tokenMintA: tokenMintA.toString(),
-          tokenBMint: tokenMintB.toString(),
-          initialPrice: form.initialPrice.toString(),
-          instructionCount: rawInstructions.length
-        });
-            
-        return {
-          serializedInstruction,
-          isValid: true,
-          governance: form.governedAccount?.governance,
-          additionalSerializedInstructions: additionalSerializedInstructions.length > 0 ? additionalSerializedInstructions : undefined,
-          prerequisiteInstructions: [], // Add any setup instructions that need to run before main instruction
-          prerequisiteInstructionsSigners: [], // Add any signers needed for prerequisite instructions
-          chunkBy: 1, // Controls how instructions are grouped in transactions
-        };
-      } catch (e) {
-        console.error("Error generating splash pool instructions:", e);
-        throw e;
       }
-    } catch (e) {
-      console.error("Error creating splash pool instruction:", e);
+    }
+
+    try {
+      // Create a compatible wallet adapter
+      const walletAdapter = {
+        publicKey: wallet.publicKey,
+        signTransaction: wallet.signTransaction,
+        signAllTransactions: wallet.signAllTransactions
+      }
+      
+      // Create WhirlpoolContext
+      const ctx = WhirlpoolContext.from(
+        connection.current,
+        walletAdapter,
+        ORCA_WHIRLPOOL_PROGRAM_ID
+      )
+      
+      // Build client
+      const client = buildWhirlpoolClient(ctx)
+      
+      // Use default config if not provided
+      const whirlpoolConfig = form.whirlpoolConfig 
+        ? new PublicKey(form.whirlpoolConfig) 
+        : DEFAULT_WHIRLPOOLS_CONFIG
+      
+      // Convert initialPrice to Decimal type
+      const initialPrice = new Decimal(form.initialPrice)
+      
+      // Create splash pool transaction
+      const { tx } = await client.createSplashPool(
+        whirlpoolConfig, 
+        new PublicKey(form.tokenMintA),
+        new PublicKey(form.tokenMintB),
+        initialPrice,
+        form.governedAccount.governance.pubkey
+      )
+      
+      // Get the transaction and serialize it
+      const instructions = tx.build()[0].instructions
+      
+      return {
+        serializedInstruction: serializeInstructionToBase64(instructions[0]),
+        isValid: true,
+        governance: form.governedAccount.governance,
+      }
+    } catch (error) {
+      console.error('Error creating splash pool instruction:', error)
+      setFormErrors({
+        instruction: 'Error creating instruction: ' + (error instanceof Error ? error.message : String(error))
+      })
       return {
         serializedInstruction: '',
         isValid: false,
         governance: form.governedAccount?.governance,
-      };
+      }
     }
-  };
+  }
 
-  // Helper function to extract the mint pubkey from an asset account
-  const getMintPubkeyFromAsset = (asset: AssetAccount): PublicKey => {
-    if (asset.type === AccountType.MINT) {
-      return asset.pubkey;
-    } else if (asset.extensions.mint) {
-      return asset.extensions.mint.publicKey;
-    }
-    throw new Error("Asset does not contain a valid mint");
-  };
- 
   useEffect(() => {
-    // The part that integrates with the new proposal creation
     handleSetInstructions(
       { governedAccount: form.governedAccount?.governance, getInstruction },
-      index,
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form]);
- 
-  // Prepare fields for the form
-  const inputs: InstructionInput[] = [
-    {
-      label: "Governance",
-      initialValue: form.governedAccount,
-      name: "governedAccount",
-      type: InstructionInputType.GOVERNED_ACCOUNT,
-      shouldBeGoverned: shouldBeGoverned as any,
-      governance: governance,
-      options: filteredAccounts,
-    },
-    {
-      label: "Token A Mint",
-      initialValue: form.tokenAMint,
-      name: "tokenAMint",
-      type: InstructionInputType.SELECT,
-      options: mintAccounts,
-      shouldBeGoverned: false,
-    },
-    {
-      label: "Token B Mint",
-      initialValue: form.tokenBMint,
-      name: "tokenBMint",
-      type: InstructionInputType.SELECT,
-      options: mintAccounts,
-      shouldBeGoverned: false,
-    },
-    {
-      label: "Initial Price",
-      initialValue: form.initialPrice,
-      type: InstructionInputType.INPUT,
-      inputType: "number",
-      name: "initialPrice",
-      placeholder: "Set the initial price for the pool (tokenB per tokenA)",
-    },
-  ];
- 
+      index
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- TODO please fix, it can cause difficult bugs. You might wanna check out https://bobbyhadz.com/blog/react-hooks-exhaustive-deps for info. -@asktree
+  }, [form])
+
   return (
-    <InstructionForm
-      outerForm={form}
-      setForm={setForm}
-      inputs={inputs}
-      setFormErrors={setFormErrors}
-      formErrors={formErrors}
-    />
-  );
-};
- 
-export default CreateSplashPool;
+    <>
+      <GovernedAccountSelect
+        label="Governance"
+        governedAccounts={assetAccounts.filter(
+          (x) => ownVoterWeight?.canCreateProposal(x.governance.account.config)
+        )}
+        onChange={(value) => {
+          handleSetForm({ value, propertyName: 'governedAccount' })
+        }}
+        value={form.governedAccount}
+        error={formErrors['governedAccount']}
+        shouldBeGoverned={shouldBeGoverned}
+        governance={governance}
+      />
+
+      <TokenMintInput
+        noMaxWidth={false}
+        label="Token Mint A"
+        onValidMintChange={(mintAddress) => {
+          handleSetForm({
+            value: mintAddress,
+            propertyName: 'tokenMintA',
+          })
+        }}
+      />
+
+      <TokenMintInput
+        noMaxWidth={false}
+        label="Token Mint B"
+        onValidMintChange={(mintAddress) => {
+          handleSetForm({
+            value: mintAddress,
+            propertyName: 'tokenMintB',
+          })
+        }}
+      />
+
+      <Input
+        label="Initial Price (price of Token A in terms of Token B)"
+        value={form.initialPrice}
+        type="number"
+        min="0"
+        onChange={(e) => {
+          handleSetForm({
+            value: e.target.value,
+            propertyName: 'initialPrice',
+          })
+        }}
+        error={formErrors['initialPrice']}
+      />
+
+      <Input
+        label="Whirlpool Config (optional - defaults to devnet config)"
+        value={form.whirlpoolConfig}
+        type="text"
+        onChange={(e) => {
+          handleSetForm({
+            value: e.target.value,
+            propertyName: 'whirlpoolConfig',
+          })
+        }}
+        error={formErrors['whirlpoolConfig']}
+      />
+      
+      {formErrors['instruction'] && (
+        <div className="text-red-500 text-sm mt-2">{formErrors['instruction']}</div>
+      )}
+    </>
+  )
+}
+
+export default OrcaCreateSplashPool
