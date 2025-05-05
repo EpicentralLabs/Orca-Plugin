@@ -47,8 +47,8 @@ const OrcaCreateSplashPool = ({
     setForm({ ...form, [propertyName]: value })
   }
 
-  // Default Orca WhirlpoolsConfig on devnet
-  const DEFAULT_WHIRLPOOLS_CONFIG = new PublicKey('FcrweFY1G9HJAHG5inkGB6pKg1HZ6x9UC2WioAfWrGkR')
+  // Default Orca WhirlpoolsConfig on mainnet
+  const DEFAULT_WHIRLPOOLS_CONFIG = new PublicKey('2LecshUwdy9xi7meFgHtFJQNSKk4KdTrcpvaB56dP2NQ')
   
   // Orca Whirlpool Program ID
   const ORCA_WHIRLPOOL_PROGRAM_ID = new PublicKey('whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc')
