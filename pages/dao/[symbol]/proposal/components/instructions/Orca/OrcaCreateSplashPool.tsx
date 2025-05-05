@@ -22,7 +22,6 @@ interface OrcaCreateSplashPoolForm {
   tokenMintA?: string
   tokenMintB?: string
   initialPrice?: string
-  whirlpoolConfig?: string
 }
 
 const OrcaCreateSplashPool = ({
@@ -69,11 +68,7 @@ const OrcaCreateSplashPool = ({
       .required('Token Mint B is required'),
     initialPrice: yup
       .string()
-      .required('Initial price is required'),
-    whirlpoolConfig: yup
-      .string()
-      .test(validatePubkey)
-      .notRequired()
+      .required('Initial price is required')
   })
 
   async function getInstruction(): Promise<UiInstruction> {
@@ -106,10 +101,8 @@ const OrcaCreateSplashPool = ({
       // Build client
       const client = buildWhirlpoolClient(ctx)
       
-      // Use default config if not provided
-      const whirlpoolConfig = form.whirlpoolConfig 
-        ? new PublicKey(form.whirlpoolConfig) 
-        : DEFAULT_WHIRLPOOLS_CONFIG
+      // Always use the default mainnet config
+      const whirlpoolConfig = DEFAULT_WHIRLPOOLS_CONFIG
       
       // Convert initialPrice to Decimal type
       const initialPrice = new Decimal(form.initialPrice)
@@ -202,19 +195,6 @@ const OrcaCreateSplashPool = ({
           })
         }}
         error={formErrors['initialPrice']}
-      />
-
-      <Input
-        label="Whirlpool Config (optional - defaults to devnet config)"
-        value={form.whirlpoolConfig}
-        type="text"
-        onChange={(e) => {
-          handleSetForm({
-            value: e.target.value,
-            propertyName: 'whirlpoolConfig',
-          })
-        }}
-        error={formErrors['whirlpoolConfig']}
       />
       
       {formErrors['instruction'] && (
