@@ -1,26 +1,27 @@
-import { useContext, useEffect, useState } from 'react'
+import { useContext, useEffect, useState, useMemo } from 'react'
 import * as yup from 'yup'
 import { Governance, ProgramAccount, serializeInstructionToBase64 } from '@solana/spl-governance'
 import { PublicKey } from '@solana/web3.js'
-import { validateInstruction } from '@utils/instructionTools'
+import { isFormValid, validatePubkey } from '@utils/formValidation'
 import { UiInstruction } from '@utils/uiTypes/proposalCreationTypes'
 import { NewProposalContext } from '../../../new'
-import GovernedAccountSelect from '../../GovernedAccountSelect'
 import useGovernanceAssets from '@hooks/useGovernanceAssets'
 import { useLegacyVoterWeight } from '@hooks/queries/governancePower'
-import TokenMintInput from '@components/inputs/TokenMintInput'
 import useLegacyConnectionContext from '@hooks/useLegacyConnectionContext'
 import useWalletOnePointOh from '@hooks/useWalletOnePointOh'
-import { isFormValid, validatePubkey } from '@utils/formValidation'
-import Input from '@components/inputs/Input'
 import { WhirlpoolContext, buildWhirlpoolClient } from '@orca-so/whirlpools-sdk'
 import Decimal from 'decimal.js'
+import InstructionForm, { InstructionInput } from '../FormCreator'
+import { InstructionInputType } from '../inputInstructionType'
+import { AssetAccount } from '@utils/uiTypes/assets'
+import tokenPriceService from '@utils/services/tokenPrice'
+import { abbreviateAddress } from '@utils/formatting'
 
 // Form interface for the component
 interface OrcaCreateSplashPoolForm {
-  governedAccount?: any
-  tokenMintA?: string
-  tokenMintB?: string
+  governedAccount?: AssetAccount | null
+  tokenMintA?: { name: string; value: string } | null
+  tokenMintB?: { name: string; value: string } | null
   initialPrice?: string
 }
 
@@ -33,18 +34,17 @@ const OrcaCreateSplashPool = ({
 }) => {
   const connection = useLegacyConnectionContext()
   const wallet = useWalletOnePointOh()
-  const { result: ownVoterWeight } = useLegacyVoterWeight()
-  const { assetAccounts } = useGovernanceAssets()
+  const { assetAccounts, governedTokenAccountsWithoutNfts } = useGovernanceAssets()
   const shouldBeGoverned = !!(index !== 0 && governance)
   
-  const [form, setForm] = useState<OrcaCreateSplashPoolForm>({})
+  const [form, setForm] = useState<OrcaCreateSplashPoolForm>({
+    governedAccount: null,
+    tokenMintA: null,
+    tokenMintB: null,
+    initialPrice: '',
+  })
   const [formErrors, setFormErrors] = useState({})
   const { handleSetInstructions } = useContext(NewProposalContext)
-
-  const handleSetForm = ({ propertyName, value }) => {
-    setFormErrors({})
-    setForm({ ...form, [propertyName]: value })
-  }
 
   // Default Orca WhirlpoolsConfig on mainnet
   const DEFAULT_WHIRLPOOLS_CONFIG = new PublicKey('2LecshUwdy9xi7meFgHtFJQNSKk4KdTrcpvaB56dP2NQ')
@@ -59,23 +59,44 @@ const OrcaCreateSplashPool = ({
       .nullable()
       .required('Governed account is required'),
     tokenMintA: yup
-      .string()
-      .test(validatePubkey)
+      .object()
+      .nullable()
       .required('Token Mint A is required'),
     tokenMintB: yup
-      .string()
-      .test(validatePubkey)
+      .object()
+      .nullable()
       .required('Token Mint B is required'),
     initialPrice: yup
       .string()
       .required('Initial price is required')
   })
 
+  // Get token options from the selected governance account
+  const tokenOptions = useMemo(() => {
+    if (!form.governedAccount) return []
+
+    const governedTokenAccounts = governedTokenAccountsWithoutNfts.filter(
+      (account) => account.governance.pubkey.equals(form.governedAccount?.governance?.pubkey || new PublicKey(''))
+    )
+    
+    return governedTokenAccounts.map((account) => {
+      const mintAddress = account.extensions.mint?.publicKey.toBase58() || ''
+      const tokenInfo = tokenPriceService.getTokenInfo(mintAddress)
+      
+      return {
+        name: tokenInfo?.symbol 
+          ? `${tokenInfo.symbol} (${abbreviateAddress(new PublicKey(mintAddress))})`
+          : abbreviateAddress(new PublicKey(mintAddress)),
+        value: mintAddress
+      }
+    })
+  }, [form.governedAccount, governedTokenAccountsWithoutNfts])
+
   async function getInstruction(): Promise<UiInstruction> {
     const { isValid, validationErrors } = await isFormValid(schema, form)
     setFormErrors(validationErrors)
     
-    if (!connection || !isValid || !form.governedAccount?.governance?.account || !form.tokenMintA || !form.tokenMintB || !form.initialPrice || !wallet?.publicKey) {
+    if (!connection || !isValid || !form.governedAccount?.governance?.account || !form.tokenMintA?.value || !form.tokenMintB?.value || !form.initialPrice || !wallet?.publicKey) {
       return {
         serializedInstruction: '',
         isValid: false,
@@ -110,8 +131,8 @@ const OrcaCreateSplashPool = ({
       // Create splash pool transaction
       const { tx } = await client.createSplashPool(
         whirlpoolConfig, 
-        new PublicKey(form.tokenMintA),
-        new PublicKey(form.tokenMintB),
+        new PublicKey(form.tokenMintA.value),
+        new PublicKey(form.tokenMintB.value),
         initialPrice,
         form.governedAccount.governance.pubkey
       )
@@ -145,57 +166,52 @@ const OrcaCreateSplashPool = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- TODO please fix, it can cause difficult bugs. You might wanna check out https://bobbyhadz.com/blog/react-hooks-exhaustive-deps for info. -@asktree
   }, [form])
 
+  // Define the form inputs
+  const inputs: InstructionInput[] = [
+    {
+      label: 'Governance',
+      initialValue: form.governedAccount,
+      name: 'governedAccount',
+      type: InstructionInputType.GOVERNED_ACCOUNT,
+      shouldBeGoverned: shouldBeGoverned,
+      governance: governance,
+      options: assetAccounts,
+    },
+    {
+      label: 'Token Mint A',
+      initialValue: form.tokenMintA,
+      name: 'tokenMintA',
+      type: InstructionInputType.SELECT,
+      options: tokenOptions,
+    },
+    {
+      label: 'Token Mint B',
+      initialValue: form.tokenMintB,
+      name: 'tokenMintB',
+      type: InstructionInputType.SELECT,
+      options: tokenOptions,
+    },
+    {
+      label: 'Initial Price (price of Token A in terms of Token B)',
+      initialValue: form.initialPrice,
+      name: 'initialPrice',
+      type: InstructionInputType.INPUT,
+      inputType: 'number',
+      min: 0,
+    }
+  ]
+
   return (
     <>
-      <GovernedAccountSelect
-        label="Governance"
-        governedAccounts={assetAccounts.filter(
-          (x) => ownVoterWeight?.canCreateProposal(x.governance.account.config)
-        )}
-        onChange={(value) => {
-          handleSetForm({ value, propertyName: 'governedAccount' })
-        }}
-        value={form.governedAccount}
-        error={formErrors['governedAccount']}
-        shouldBeGoverned={shouldBeGoverned}
-        governance={governance}
-      />
-
-      <TokenMintInput
-        noMaxWidth={false}
-        label="Token Mint A"
-        onValidMintChange={(mintAddress) => {
-          handleSetForm({
-            value: mintAddress,
-            propertyName: 'tokenMintA',
-          })
-        }}
-      />
-
-      <TokenMintInput
-        noMaxWidth={false}
-        label="Token Mint B"
-        onValidMintChange={(mintAddress) => {
-          handleSetForm({
-            value: mintAddress,
-            propertyName: 'tokenMintB',
-          })
-        }}
-      />
-
-      <Input
-        label="Initial Price (price of Token A in terms of Token B)"
-        value={form.initialPrice}
-        type="number"
-        min="0"
-        onChange={(e) => {
-          handleSetForm({
-            value: e.target.value,
-            propertyName: 'initialPrice',
-          })
-        }}
-        error={formErrors['initialPrice']}
-      />
+      {form && (
+        <InstructionForm
+          outerForm={form}
+          setForm={setForm}
+          inputs={inputs}
+          setFormErrors={setFormErrors}
+          formErrors={formErrors}
+        />
+      )}
       
       {formErrors['instruction'] && (
         <div className="text-red-500 text-sm mt-2">{formErrors['instruction']}</div>
