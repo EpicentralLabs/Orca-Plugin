@@ -847,7 +847,7 @@ export default function useGovernanceAssets() {
      ██    ██ ██   ██ ██      ██   ██ 
       ██████  ██   ██  ██████ ██   ██                         
     */
-    [Instructions.CreateSplashPool]: {
+    [Instructions.OrcaCreateSplashPool]: {
       name: 'Create Whirlpool Splash Pool',
       packageId: PackageEnum.Orca,
     },
