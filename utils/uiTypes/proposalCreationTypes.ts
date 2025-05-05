@@ -425,7 +425,7 @@ export enum Instructions {
   SymmetryWithdraw,
   TokenWithdrawFees,
   CollectPoolFees,
-  CreateSplashPool
+  OrcaCreateSplashPool
 }
 
 export interface ComponentInstructionData {

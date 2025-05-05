@@ -155,7 +155,8 @@ import CancelLimitOrder from './components/instructions/Manifest/CancelLimitOrde
 import WithdrawFees from './components/instructions/Token2022/WithdrawFees'
 import SquadsV4RemoveMember from './components/instructions/Squads/SquadsV4RemoveMember'
 import CollectPoolFees from './components/instructions/Raydium/CollectPoolFees'
-import CreateSplashPool from './components/instructions/Orca/CreateSplashPool'
+import OrcaCreateSplashPool from './components/instructions/Orca/OrcaCreateSplashPool'
+// Removing the import for CreateSplashPool since the module cannot be found
 
 const TITLE_LENGTH_LIMIT = 130
 // the true length limit is either at the tx size level, and maybe also the total account size level (I can't remember)
@@ -635,7 +636,7 @@ const New = () => {
       [Instructions.SymmetryDeposit]: SymmetryDeposit,
       [Instructions.SymmetryWithdraw]: SymmetryWithdraw,
       [Instructions.CollectPoolFees]: CollectPoolFees,
-      [Instructions.CreateSplashPool]: CreateSplashPool
+      [Instructions.OrcaCreateSplashPool]: OrcaCreateSplashPool
     }),
     [governance?.pubkey?.toBase58()],
   )
